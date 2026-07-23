@@ -48,20 +48,15 @@ def evaluate(prc, label, **overrides):
 
 def main(path):
     prc = E.load_prices(path)
-    print(f"{'variant':<30}segment scores")
-    print("-" * 102)
-    # round 2: resid-only grid over ALGO sizing cap x aggression
-    evaluate(prc, "baseline (nf2 band15 AGGR1)")
-    print("-" * 102)
-    for cap in (100_000, 30_000, 10_000):
-        for ag in (1.0, 1.5, 2.0):
-            evaluate(prc, f"ALGO cap {cap//1000}k, AGGR {ag}",
-                     ALGO_SIZE_CAP=float(cap), AGGR=ag)
-    print("-" * 102)
-    evaluate(prc, "nf=3, ALGO 10k, AGGR 1.5",
-             NF=3, ALGO_SIZE_CAP=10_000.0, AGGR=1.5)
-    evaluate(prc, "nf=3, ALGO 30k, AGGR 1.5",
-             NF=3, ALGO_SIZE_CAP=30_000.0, AGGR=1.5)
+    print(f"{'variant':<34}segment scores")
+    print("-" * 106)
+    evaluate(prc, "prev best (raw, AGGR 2, 100k)", VOL_NORM=False, AGGR=2.0)
+    evaluate(prc, "raw resid, AGGR 1.5", VOL_NORM=False, AGGR=1.5)
+    print("-" * 106)
+    for cap in (100_000, 50_000, 20_000):
+        for ag in (1.5, 2.0, 3.0):
+            evaluate(prc, f"VOLNORM, ALGO {cap//1000}k, AGGR {ag}",
+                     VOL_NORM=True, ALGO_SIZE_CAP=float(cap), AGGR=ag)
 
 
 if __name__ == "__main__":
