@@ -48,20 +48,20 @@ def evaluate(prc, label, **overrides):
 
 def main(path):
     prc = E.load_prices(path)
-    print(f"{'variant':<28}segment scores")
-    print("-" * 100)
-    evaluate(prc, "combined (as-is)")
-    evaluate(prc, "resid only", W_MKT=0.0)
-    evaluate(prc, "mkt only", W_RESID=0.0)
-    print("-" * 100)
-    evaluate(prc, "resid only, band 2%", W_MKT=0.0, REBAL_BAND=0.02)
-    evaluate(prc, "resid only, band 15%", W_MKT=0.0, REBAL_BAND=0.15)
-    evaluate(prc, "resid only, nf=1", W_MKT=0.0, NF=1)
-    evaluate(prc, "resid only, nf=3", W_MKT=0.0, NF=3)
-    print("-" * 100)
-    evaluate(prc, "combined, AR gate t>2", AR_TMIN=2.0)
-    evaluate(prc, "combined, mkt weight 0.3", W_MKT=0.3)
-    evaluate(prc, "mkt only, AR gate t>2", W_RESID=0.0, AR_TMIN=2.0)
+    print(f"{'variant':<30}segment scores")
+    print("-" * 102)
+    # round 2: resid-only grid over ALGO sizing cap x aggression
+    evaluate(prc, "baseline (nf2 band15 AGGR1)")
+    print("-" * 102)
+    for cap in (100_000, 30_000, 10_000):
+        for ag in (1.0, 1.5, 2.0):
+            evaluate(prc, f"ALGO cap {cap//1000}k, AGGR {ag}",
+                     ALGO_SIZE_CAP=float(cap), AGGR=ag)
+    print("-" * 102)
+    evaluate(prc, "nf=3, ALGO 10k, AGGR 1.5",
+             NF=3, ALGO_SIZE_CAP=10_000.0, AGGR=1.5)
+    evaluate(prc, "nf=3, ALGO 30k, AGGR 1.5",
+             NF=3, ALGO_SIZE_CAP=30_000.0, AGGR=1.5)
 
 
 if __name__ == "__main__":
