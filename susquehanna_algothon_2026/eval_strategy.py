@@ -87,6 +87,8 @@ def main(path, mod_name="teamName_v2"):
         f"C[{dB}-{n_days}]": pnl[dB:n_days],
         "full": pnl[WARM:],
     }
+    if n_days > 800:
+        segs[f"LEADERBOARD[750-{n_days}]"] = pnl[750:n_days]
     print(f"Strategy: {mod_name}")
     for name, p in segs.items():
         mu, sd = p.mean(), p.std()
