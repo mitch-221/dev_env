@@ -72,11 +72,18 @@ def rank_ic(signal, fwd_ret):
 
 
 def pairs_analysis(prc, rets, tickers, out_prefix="universe"):
-    """Write correlation matrix CSV and a pairs/cointegration report."""
+    """Write correlation matrix CSV + a pairs report ranked by the
+    out-of-sample net Sharpe of a toy z-score reversion strategy.
+
+    Every one of the 51*50/2 pairs is tested. Hedge ratio is fit on the
+    first 60% of days (train); the Sharpe is computed only on the last
+    40% (test), net of real commissions. This guards against the
+    multiple-testing trap of screening 1275 pairs.
+    """
     import csv
     from statsmodels.tsa.stattools import adfuller
 
-    n_inst = prc.shape[0]
+    n_inst, n_days = prc.shape
     cm = np.corrcoef(rets)
 
     # ---- full correlation matrix -> CSV ----
@@ -87,97 +94,137 @@ def pairs_analysis(prc, rets, tickers, out_prefix="universe"):
         for i in range(n_inst):
             w.writerow([tickers[i]] + [f"{cm[i, j]:.4f}" for j in range(n_inst)])
 
-    # ---- rank all pairs by |return correlation| ----
-    pairs = []
-    for i in range(n_inst):
-        for j in range(i + 1, n_inst):
-            pairs.append((abs(cm[i, j]), cm[i, j], i, j))
-    pairs.sort(reverse=True)
-
-    # ---- cointegration / spread tests on top candidates ----
     log_p = np.log(prc)
-    n_test = min(60, len(pairs))
+    split = int(n_days * 0.6)
+    Z_WINDOW = 30          # rolling window for spread z-score
+    Z_CAP = 2.0            # position = -clip(z, -cap, cap)
+    Z_BAND = 0.25          # only rebalance when z moves this much (cost control)
+    COMM = np.full(n_inst, 0.0001)
+    COMM[0] = 0.00002
 
-    # Per-asset ADF (is each leg individually stationary?) - needed to
-    # distinguish real cointegration from two independently mean-reverting
-    # series, which also produce a "stationary" spread.
-    leg_adf = np.full(n_inst, np.nan)
-    for i in range(n_inst):
-        try:
-            leg_adf[i] = adfuller(log_p[i], autolag="AIC")[1]
-        except Exception:
-            pass
-
-    results = []
-    for _, c, i, j in pairs[:n_test]:
-        # OLS hedge ratio: log_p[i] ~ beta * log_p[j]
+    def pair_backtest(i, j):
+        """Returns (oos_sharpe, beta, half_life, spr_vol, adf_p)."""
         x, y = log_p[j], log_p[i]
-        beta = np.cov(y, x)[0, 1] / np.var(x)
+        xt, yt = x[:split], y[:split]
+        vx = np.var(xt)
+        if vx < 1e-12:
+            return None
+        beta = np.cov(yt, xt)[0, 1] / vx
         spread = y - beta * x
-        # ADF stationarity test on the spread
+
+        # diagnostics on train segment
+        st = spread[:split]
         try:
-            adf_p = adfuller(spread, autolag="AIC")[1]
+            adf_p = adfuller(st, autolag="AIC")[1]
         except Exception:
             adf_p = np.nan
-        # Half-life from AR(1): ds_t = a + b*s_{t-1} + e
-        s0, s1 = spread[:-1], spread[1:]
+        s0, s1 = st[:-1], st[1:]
         b = np.cov(s1 - s0, s0)[0, 1] / np.var(s0)
         half_life = -np.log(2) / b if b < 0 else np.inf
-        # Spread daily vol in return terms (tradeability proxy)
-        spr_vol = np.diff(spread).std()
-        results.append((i, j, c, beta, adf_p, half_life, spr_vol))
+        spr_vol = np.diff(st).std()
+
+        # rolling z-score over full series
+        n = len(spread)
+        if n <= Z_WINDOW + 5:
+            return None
+        z = np.full(n, np.nan)
+        for t in range(Z_WINDOW, n):
+            w_ = spread[t - Z_WINDOW:t]
+            sd = w_.std()
+            if sd > 1e-12:
+                z[t] = (spread[t] - w_.mean()) / sd
+
+        # positions in $ per $1 of unit size: leg i = -z, leg j = +z*beta
+        pos = 0.0
+        pnl = np.zeros(n)
+        gross = np.abs(1.0) + np.abs(beta)
+        for t in range(Z_WINDOW, n - 1):
+            zt = z[t]
+            if np.isfinite(zt) and abs(zt - (-pos)) > Z_BAND:
+                new_pos = -np.clip(zt, -Z_CAP, Z_CAP)
+            else:
+                new_pos = pos
+            turn = abs(new_pos - pos)
+            cost = turn * (COMM[i] + abs(beta) * COMM[j])
+            pos = new_pos
+            # next-day pnl of $pos in leg i, $-pos*beta... expressed via spread
+            ds = spread[t + 1] - spread[t]
+            pnl[t + 1] = pos * ds - cost
+        oos = pnl[max(split, Z_WINDOW + 1):]
+        full = pnl[Z_WINDOW + 1:]
+        sd, sdf = oos.std(), full.std()
+        if sd < 1e-12 or sdf < 1e-12:
+            return None
+        sharpe = np.sqrt(249) * oos.mean() / sd
+        sharpe_full = np.sqrt(249) * full.mean() / sdf
+        return sharpe, beta, half_life, spr_vol, adf_p, sharpe_full
+
+    results = []
+    for i in range(n_inst):
+        for j in range(i + 1, n_inst):
+            r = pair_backtest(i, j)
+            if r is not None:
+                results.append((r[0], i, j, cm[i, j], r[1], r[2], r[3],
+                                r[4], r[5]))
+    results.sort(key=lambda r: -r[0])
 
     rep_path = f"{out_prefix}_pairs_report.txt"
     with open(rep_path, "w") as f:
-        f.write("PAIRS / SPREAD ANALYSIS\n")
-        f.write("=" * 78 + "\n")
-        f.write("Top pairs by |return correlation|, with cointegration tests.\n")
-        f.write("ADF p < 0.05 => spread is stationary (mean-reverting).\n")
-        f.write("CAUTION: if both legs are individually stationary (legs-ADF\n")
-        f.write("both < 0.05), the spread being stationary is NOT evidence of\n")
-        f.write("a pairs relationship - each leg mean-reverts on its own.\n")
-        f.write("Half-life = days for spread to close half the gap; tradeable\n")
-        f.write("range is roughly 1-20 days given 1bp commissions.\n\n")
-        f.write(f"{'pair':<14}{'ret corr':>9}{'beta':>8}{'ADF p':>9}"
-                f"{'half-life':>11}{'spr vol':>9}{'legs ADF':>16}\n")
-        f.write("-" * 78 + "\n")
-        for i, j, c, beta, adf_p, hl, sv in results:
+        f.write("PAIRS / SPREAD ANALYSIS - ranked by OUT-OF-SAMPLE net Sharpe\n")
+        f.write("=" * 84 + "\n")
+        f.write(f"All {len(results)} pairs backtested with a z-score reversion "
+                f"rule (window {Z_WINDOW}d,\n")
+        f.write(f"cap {Z_CAP}, rebalance band {Z_BAND}), real commissions "
+                f"(1bp / 0.2bp ALGO).\n")
+        f.write(f"Hedge ratio fit on days 0-{split} (train); OOS Sharpe "
+                f"measured on days {split}-{n_days}.\n")
+        f.write("Full Sharpe covers the whole period (incl. the days beta was "
+                "fit on - flattering).\n")
+        f.write("A big Full-vs-OOS gap = relationship was luck or has "
+                "drifted. Rank by OOS.\n\n")
+        f.write(f"{'pair':<14}{'OOS Sharpe':>11}{'Full Sharpe':>12}"
+                f"{'ret corr':>10}{'beta':>8}"
+                f"{'ADF p':>8}{'half-life':>11}{'spr vol':>9}\n")
+        f.write("-" * 84 + "\n")
+        for s, i, j, c, beta, hl, sv, adf_p, sf in results[:40]:
             name = f"{tickers[i]}/{tickers[j]}"
             hl_s = f"{hl:.1f}" if np.isfinite(hl) else "inf"
-            legs = f"{leg_adf[i]:.2f}/{leg_adf[j]:.2f}"
-            f.write(f"{name:<14}{c:>+9.3f}{beta:>8.2f}{adf_p:>9.3f}"
-                    f"{hl_s:>11}{sv:>9.4f}{legs:>16}\n")
-        # Promising = stationary spread + usable half-life + genuinely
-        # correlated legs (weeds out coincidental stationary spreads).
-        good = [r for r in results
-                if np.isfinite(r[4]) and r[4] < 0.05
-                and np.isfinite(r[5]) and 0 < r[5] <= 20
-                and abs(r[2]) >= 0.25]
-        f.write("\n" + "=" * 78 + "\n")
-        if good:
-            f.write(f"PROMISING PAIRS (stationary spread, half-life <=20d, "
-                    f"|corr| >= 0.25): {len(good)}\n")
-            for i, j, c, beta, adf_p, hl, sv in sorted(good, key=lambda r: r[4]):
-                legs_note = ""
-                if leg_adf[i] < 0.05 and leg_adf[j] < 0.05:
-                    legs_note = "  [both legs stationary alone - weaker evidence]"
-                f.write(f"  {tickers[i]}/{tickers[j]}: corr {c:+.3f}, "
-                        f"beta {beta:.2f}, ADF p={adf_p:.3f}, "
-                        f"half-life {hl:.1f}d{legs_note}\n")
-        else:
-            f.write("No pairs passed all screens (stationary spread + usable "
-                    "half-life + |corr| >= 0.25).\n")
+            f.write(f"{name:<14}{s:>+11.2f}{sf:>+12.2f}{c:>+10.3f}{beta:>8.2f}"
+                    f"{adf_p:>8.3f}{hl_s:>11}{sv:>9.4f}\n")
+
+        f.write("\n" + "=" * 84 + "\n")
+        strong = [r for r in results if r[0] > 1.0]
+        f.write(f"Pairs with OOS net Sharpe > 1.0: {len(strong)}\n")
+        f.write("Sanity notes:\n")
+        f.write("- With ~1275 pairs tested, expect a handful of OOS Sharpes "
+                "near +/-1 by pure luck.\n")
+        f.write("  Trust pairs where high OOS Sharpe coincides with low ADF p "
+                "and sensible half-life.\n")
+        f.write("- Check the same pair ranks well if you nudge Z_WINDOW; "
+                "fragile rankings are noise.\n")
+        f.write("- If ONE ticker appears near the top paired with many "
+                "different partners, the edge is\n")
+        f.write("  that single asset's own mean reversion, not a pairs "
+                "relationship - trade it outright\n")
+        f.write("  instead (cheaper: one leg of commission, not two).\n")
 
     print(f"\nWrote: {cm_path}")
     print(f"Wrote: {rep_path}")
-    top = pairs[0]
-    print(f"Highest |return corr| pair: {tickers[top[2]]}/{tickers[top[3]]} "
-          f"({top[1]:+.3f})")
-    good_n = sum(1 for r in results
-                 if np.isfinite(r[4]) and r[4] < 0.05
-                 and np.isfinite(r[5]) and 0 < r[5] <= 20
-                 and abs(r[2]) >= 0.25)
-    print(f"Pairs passing full screen (coint + half-life + corr): {good_n}")
+    if results:
+        s, i, j, c, beta, hl, sv, adf_p, sf = results[0]
+        print(f"Best OOS pair: {tickers[i]}/{tickers[j]} "
+              f"OOS Sharpe {s:+.2f} (full {sf:+.2f}, corr {c:+.3f}, "
+              f"ADF p {adf_p:.3f})")
+        print(f"Pairs with OOS net Sharpe > 1.0: "
+              f"{sum(1 for r in results if r[0] > 1.0)}")
+
+    # ---- full correlation matrix -> CSV ----
+    cm_path = f"{out_prefix}_corr_matrix.csv"
+    with open(cm_path, "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow([""] + tickers)
+        for i in range(n_inst):
+            w.writerow([tickers[i]] + [f"{cm[i, j]:.4f}" for j in range(n_inst)])
 
 
 def main(path):
