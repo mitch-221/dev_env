@@ -30,15 +30,17 @@ NF = 2            # number of PCA factors to strip
 H = 3             # reversion horizon (days)
 FITW = 250        # factor fit window
 REFIT_EVERY = 20  # days between factor refits
-W_RESID = 0.75    # weight of component in [-1,1] exposure
+W_RESID = 1.0     # weight of component in [-1,1] exposure
+AGGR = 1.0        # steepness inside tanh (higher = closer to caps)
+ALGO_SIZE_CAP = 100_000.0  # sizing cap for ALGO (real cap stays 100k)
 
 # ---- Component 2: adaptive market lead-lag ----
 AR_WINDOW = 150   # trailing window for market AR(1) estimate
 AR_TMIN = 1.0     # |t-stat| gate before the overlay activates
-W_MKT = 0.6       # weight of component
+W_MKT = 0.0       # overlay disabled: market AR(1) never statistically significant
 
 # ---- Execution ----
-REBAL_BAND = 0.08  # min |target-current| as fraction of cap to trade
+REBAL_BAND = 0.15  # min |target-current| as fraction of cap to trade
 MIN_HISTORY = FITW + 10
 
 _pos = np.zeros(N_INST, dtype=int)
@@ -81,7 +83,7 @@ def getMyPosition(prcSoFar):
         _last_fit = n_days
     rh = rets[:, -H:].sum(axis=1)
     resid = rh - _V @ (_V.T @ rh)
-    expo_resid = np.tanh(-_zscore_xs(resid))
+    expo_resid = np.tanh(-AGGR * _zscore_xs(resid))
 
     # ---- Component 2: adaptive market lead-lag ----
     mkt = rets.mean(axis=0)
@@ -98,7 +100,9 @@ def getMyPosition(prcSoFar):
 
     # ---- Combine, size, execute ----
     expo = np.clip(W_RESID * expo_resid + W_MKT * expo_mkt, -1, 1)
-    target_sh = np.round(expo * CAPS / p_today).astype(int)
+    size_caps = CAPS.copy()
+    size_caps[0] = min(ALGO_SIZE_CAP, CAPS[0])
+    target_sh = np.round(expo * size_caps / p_today).astype(int)
     target_sh = np.clip(target_sh, -max_sh, max_sh)
 
     drift = np.abs(target_sh - _pos) * p_today
