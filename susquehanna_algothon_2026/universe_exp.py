@@ -24,6 +24,7 @@ N_INST = 51
 
 
 def load_prices(path):
+    tickers = None
     with open(path) as f:
         first = f.readline()
     skip = 0
@@ -31,15 +32,20 @@ def load_prices(path):
         [float(x) for x in first.replace(",", " ").split()]
     except ValueError:
         skip = 1
+        tickers = first.replace(",", " ").split()
     try:
         arr = np.loadtxt(path, skiprows=skip)
     except ValueError:
         arr = np.loadtxt(path, delimiter=",", skiprows=skip)
     if arr.shape[0] == N_INST and arr.shape[1] != N_INST:
-        return arr
-    if arr.shape[1] == N_INST:
-        return arr.T
-    raise ValueError(f"Expected one dimension == {N_INST}, got {arr.shape}")
+        pass
+    elif arr.shape[1] == N_INST:
+        arr = arr.T
+    else:
+        raise ValueError(f"Expected one dimension == {N_INST}, got {arr.shape}")
+    if tickers is None or len(tickers) != N_INST:
+        tickers = [f"A{i:02d}" for i in range(N_INST)]
+    return arr, tickers
 
 
 def autocorr(x, lag):
@@ -65,8 +71,117 @@ def rank_ic(signal, fwd_ret):
     return ics.mean(), ics.mean() / (ics.std() / np.sqrt(len(ics)))
 
 
+def pairs_analysis(prc, rets, tickers, out_prefix="universe"):
+    """Write correlation matrix CSV and a pairs/cointegration report."""
+    import csv
+    from statsmodels.tsa.stattools import adfuller
+
+    n_inst = prc.shape[0]
+    cm = np.corrcoef(rets)
+
+    # ---- full correlation matrix -> CSV ----
+    cm_path = f"{out_prefix}_corr_matrix.csv"
+    with open(cm_path, "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow([""] + tickers)
+        for i in range(n_inst):
+            w.writerow([tickers[i]] + [f"{cm[i, j]:.4f}" for j in range(n_inst)])
+
+    # ---- rank all pairs by |return correlation| ----
+    pairs = []
+    for i in range(n_inst):
+        for j in range(i + 1, n_inst):
+            pairs.append((abs(cm[i, j]), cm[i, j], i, j))
+    pairs.sort(reverse=True)
+
+    # ---- cointegration / spread tests on top candidates ----
+    log_p = np.log(prc)
+    n_test = min(60, len(pairs))
+
+    # Per-asset ADF (is each leg individually stationary?) - needed to
+    # distinguish real cointegration from two independently mean-reverting
+    # series, which also produce a "stationary" spread.
+    leg_adf = np.full(n_inst, np.nan)
+    for i in range(n_inst):
+        try:
+            leg_adf[i] = adfuller(log_p[i], autolag="AIC")[1]
+        except Exception:
+            pass
+
+    results = []
+    for _, c, i, j in pairs[:n_test]:
+        # OLS hedge ratio: log_p[i] ~ beta * log_p[j]
+        x, y = log_p[j], log_p[i]
+        beta = np.cov(y, x)[0, 1] / np.var(x)
+        spread = y - beta * x
+        # ADF stationarity test on the spread
+        try:
+            adf_p = adfuller(spread, autolag="AIC")[1]
+        except Exception:
+            adf_p = np.nan
+        # Half-life from AR(1): ds_t = a + b*s_{t-1} + e
+        s0, s1 = spread[:-1], spread[1:]
+        b = np.cov(s1 - s0, s0)[0, 1] / np.var(s0)
+        half_life = -np.log(2) / b if b < 0 else np.inf
+        # Spread daily vol in return terms (tradeability proxy)
+        spr_vol = np.diff(spread).std()
+        results.append((i, j, c, beta, adf_p, half_life, spr_vol))
+
+    rep_path = f"{out_prefix}_pairs_report.txt"
+    with open(rep_path, "w") as f:
+        f.write("PAIRS / SPREAD ANALYSIS\n")
+        f.write("=" * 78 + "\n")
+        f.write("Top pairs by |return correlation|, with cointegration tests.\n")
+        f.write("ADF p < 0.05 => spread is stationary (mean-reverting).\n")
+        f.write("CAUTION: if both legs are individually stationary (legs-ADF\n")
+        f.write("both < 0.05), the spread being stationary is NOT evidence of\n")
+        f.write("a pairs relationship - each leg mean-reverts on its own.\n")
+        f.write("Half-life = days for spread to close half the gap; tradeable\n")
+        f.write("range is roughly 1-20 days given 1bp commissions.\n\n")
+        f.write(f"{'pair':<14}{'ret corr':>9}{'beta':>8}{'ADF p':>9}"
+                f"{'half-life':>11}{'spr vol':>9}{'legs ADF':>16}\n")
+        f.write("-" * 78 + "\n")
+        for i, j, c, beta, adf_p, hl, sv in results:
+            name = f"{tickers[i]}/{tickers[j]}"
+            hl_s = f"{hl:.1f}" if np.isfinite(hl) else "inf"
+            legs = f"{leg_adf[i]:.2f}/{leg_adf[j]:.2f}"
+            f.write(f"{name:<14}{c:>+9.3f}{beta:>8.2f}{adf_p:>9.3f}"
+                    f"{hl_s:>11}{sv:>9.4f}{legs:>16}\n")
+        # Promising = stationary spread + usable half-life + genuinely
+        # correlated legs (weeds out coincidental stationary spreads).
+        good = [r for r in results
+                if np.isfinite(r[4]) and r[4] < 0.05
+                and np.isfinite(r[5]) and 0 < r[5] <= 20
+                and abs(r[2]) >= 0.25]
+        f.write("\n" + "=" * 78 + "\n")
+        if good:
+            f.write(f"PROMISING PAIRS (stationary spread, half-life <=20d, "
+                    f"|corr| >= 0.25): {len(good)}\n")
+            for i, j, c, beta, adf_p, hl, sv in sorted(good, key=lambda r: r[4]):
+                legs_note = ""
+                if leg_adf[i] < 0.05 and leg_adf[j] < 0.05:
+                    legs_note = "  [both legs stationary alone - weaker evidence]"
+                f.write(f"  {tickers[i]}/{tickers[j]}: corr {c:+.3f}, "
+                        f"beta {beta:.2f}, ADF p={adf_p:.3f}, "
+                        f"half-life {hl:.1f}d{legs_note}\n")
+        else:
+            f.write("No pairs passed all screens (stationary spread + usable "
+                    "half-life + |corr| >= 0.25).\n")
+
+    print(f"\nWrote: {cm_path}")
+    print(f"Wrote: {rep_path}")
+    top = pairs[0]
+    print(f"Highest |return corr| pair: {tickers[top[2]]}/{tickers[top[3]]} "
+          f"({top[1]:+.3f})")
+    good_n = sum(1 for r in results
+                 if np.isfinite(r[4]) and r[4] < 0.05
+                 and np.isfinite(r[5]) and 0 < r[5] <= 20
+                 and abs(r[2]) >= 0.25)
+    print(f"Pairs passing full screen (coint + half-life + corr): {good_n}")
+
+
 def main(path):
-    prc = load_prices(path)
+    prc, tickers = load_prices(path)
     n_inst, n_days = prc.shape
     rets = np.diff(np.log(prc), axis=1)
 
@@ -164,6 +279,12 @@ def main(path):
 
     print("\nPositive IC with good t-stat => signal predicts returns.")
     print("If reversal ICs dominate, weight W_REV up; if momentum, W_MOM.")
+
+    print()
+    print("=" * 64)
+    print("6. CORRELATION MATRIX & PAIRS (written to files)")
+    print("=" * 64)
+    pairs_analysis(prc, rets, tickers)
 
 
 if __name__ == "__main__":
