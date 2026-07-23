@@ -30,6 +30,8 @@ NF = 2            # number of PCA factors to strip
 H = 3             # reversion horizon (days)
 FITW = 250        # factor fit window
 REFIT_EVERY = 20  # days between factor refits
+VOL_NORM = True   # normalize residuals by per-asset vol before ranking
+VOL_WIN = 60      # vol estimation window
 W_RESID = 1.0     # weight of component in [-1,1] exposure
 AGGR = 1.0        # steepness inside tanh (higher = closer to caps)
 ALGO_SIZE_CAP = 100_000.0  # sizing cap for ALGO (real cap stays 100k)
@@ -83,6 +85,9 @@ def getMyPosition(prcSoFar):
         _last_fit = n_days
     rh = rets[:, -H:].sum(axis=1)
     resid = rh - _V @ (_V.T @ rh)
+    if VOL_NORM:
+        vol = np.maximum(rets[:, -VOL_WIN:].std(axis=1), 1e-8)
+        resid = resid / (vol * np.sqrt(H))
     expo_resid = np.tanh(-AGGR * _zscore_xs(resid))
 
     # ---- Component 2: adaptive market lead-lag ----
