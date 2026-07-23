@@ -1,26 +1,43 @@
 """
-Universe diagnostics for the Algothon price data.
+Range-bound asset detection + ALGO residual predictor analysis.
+
+1. RANGE-BOUND TEST
+   ADF test on log price level of each asset. Stationary price level
+   = range-bound. Also Hurst exponent (H < 0.5 = mean-reverting,
+   H > 0.5 = trending, H ~ 0.5 = random walk).
+
+2. PRICE RATIO STATIONARITY
+   For each pair where one asset is range-bound, test whether the
+   log price *ratio* is stationary (more powerful than single-asset
+   ADF). Also tests linear combinations (cointegration).
+
+3. ALGO RESIDUAL PREDICTORS
+   The 17% of ALGO variance unexplained by the basket. Tests:
+   - Is the residual itself stationary (range-bound)?
+   - Which individual assets' price levels predict the residual?
+   - Rolling regression: can we predict tomorrow's residual from
+     today's asset prices / returns?
+
+4. WALK-FORWARD RESIDUAL MEAN REVERSION
+   If the residual is stationary or predictable, simulate trading
+   it: long ALGO when residual is below its rolling mean by >1sd,
+   short when above, gated on significance.
 
 Usage:
-    python explore.py prices.txt
-
-Answers, per section:
-  1. Basics          - days, price ranges, per-asset daily vol
-  2. Reversion vs momentum
-                     - lag-1..5 return autocorrelation per asset
-                     - horizon-vs-horizon return predictability
-  3. ALGO structure  - ALGO's own autocorr, and lead-lag: do assets
-                       1-50 predict ALGO's next-day move (or vice versa)?
-  4. Factor structure- correlation matrix summary + PCA: how much
-                       variance does the top factor explain?
-  5. Signal sanity   - quick IC (rank correlation) of simple momentum
-                       and reversal signals vs next-day returns
+    python range_analysis.py prices.txt
 """
 
 import sys
 import numpy as np
+from statsmodels.tsa.stattools import adfuller, coint
 
 N_INST = 51
+CAPS = np.full(N_INST, 10_000.0)
+CAPS[0] = 100_000.0
+COMM = np.full(N_INST, 0.0001)
+COMM[0] = 0.00002
+WFIT = 150
+WARM = WFIT + 20
 
 
 def load_prices(path):
@@ -42,300 +59,232 @@ def load_prices(path):
     elif arr.shape[1] == N_INST:
         arr = arr.T
     else:
-        raise ValueError(f"Expected one dimension == {N_INST}, got {arr.shape}")
+        raise ValueError(f"bad shape {arr.shape}")
     if tickers is None or len(tickers) != N_INST:
         tickers = [f"A{i:02d}" for i in range(N_INST)]
     return arr, tickers
 
 
-def autocorr(x, lag):
-    if len(x) <= lag + 2:
-        return np.nan
-    a, b = x[:-lag], x[lag:]
-    sa, sb = a.std(), b.std()
-    if sa == 0 or sb == 0:
-        return np.nan
-    return np.corrcoef(a, b)[0, 1]
+def objective(pnl):
+    if len(pnl) == 0:
+        return 0.0
+    mu, sd = pnl.mean(), pnl.std()
+    if mu < 0 or sd < 1e-10:
+        return mu
+    sr = np.sqrt(250) * mu / sd
+    return mu * sr * sr / (sr * sr + 1.0)
 
 
-def rank_ic(signal, fwd_ret):
-    """Cross-sectional Spearman IC averaged over days."""
-    from scipy.stats import spearmanr
-    ics = []
-    for t in range(signal.shape[1]):
-        s, r = signal[:, t], fwd_ret[:, t]
-        ok = np.isfinite(s) & np.isfinite(r)
-        if ok.sum() > 5 and s[ok].std() > 0 and r[ok].std() > 0:
-            ics.append(spearmanr(s[ok], r[ok]).statistic)
-    ics = np.array(ics)
-    return ics.mean(), ics.mean() / (ics.std() / np.sqrt(len(ics)))
+def hurst(ts, max_lag=20):
+    """Hurst exponent via R/S analysis."""
+    lags = range(2, max_lag)
+    tau = [np.std(np.subtract(ts[lag:], ts[:-lag])) for lag in lags]
+    with np.errstate(divide='ignore', invalid='ignore'):
+        h = np.polyfit(np.log(lags), np.log(tau), 1)[0]
+    return h
 
 
-def pairs_analysis(prc, rets, tickers, out_prefix="universe"):
-    """Write correlation matrix CSV + a pairs report ranked by the
-    out-of-sample net Sharpe of a toy z-score reversion strategy.
+def ols(X, y, ridge=1e-6):
+    if X.ndim == 1:
+        X = X[:, None]
+    XtX = X.T @ X + ridge * np.eye(X.shape[1])
+    return np.linalg.solve(XtX, X.T @ y)
 
-    Every one of the 51*50/2 pairs is tested. Hedge ratio is fit on the
-    first 60% of days (train); the Sharpe is computed only on the last
-    40% (test), net of real commissions. This guards against the
-    multiple-testing trap of screening 1275 pairs.
-    """
-    import csv
-    from statsmodels.tsa.stattools import adfuller
 
+def rolling_algo_resid(prc, wfit=WFIT, refit=5):
+    """Walk-forward ALGO residual series."""
     n_inst, n_days = prc.shape
-    cm = np.corrcoef(rets)
-
-    # ---- full correlation matrix -> CSV ----
-    cm_path = f"{out_prefix}_corr_matrix.csv"
-    with open(cm_path, "w", newline="") as f:
-        w = csv.writer(f)
-        w.writerow([""] + tickers)
-        for i in range(n_inst):
-            w.writerow([tickers[i]] + [f"{cm[i, j]:.4f}" for j in range(n_inst)])
-
-    log_p = np.log(prc)
-    split = int(n_days * 0.6)
-    Z_WINDOW = 30          # rolling window for spread z-score
-    Z_CAP = 2.0            # position = -clip(z, -cap, cap)
-    Z_BAND = 0.25          # only rebalance when z moves this much (cost control)
-    COMM = np.full(n_inst, 0.0001)
-    COMM[0] = 0.00002
-
-    def pair_backtest(i, j):
-        """Returns (oos_sharpe, beta, half_life, spr_vol, adf_p)."""
-        x, y = log_p[j], log_p[i]
-        xt, yt = x[:split], y[:split]
-        vx = np.var(xt)
-        if vx < 1e-12:
-            return None
-        beta = np.cov(yt, xt)[0, 1] / vx
-        spread = y - beta * x
-
-        # diagnostics on train segment
-        st = spread[:split]
-        try:
-            adf_p = adfuller(st, autolag="AIC")[1]
-        except Exception:
-            adf_p = np.nan
-        s0, s1 = st[:-1], st[1:]
-        b = np.cov(s1 - s0, s0)[0, 1] / np.var(s0)
-        half_life = -np.log(2) / b if b < 0 else np.inf
-        spr_vol = np.diff(st).std()
-
-        # rolling z-score over full series
-        n = len(spread)
-        if n <= Z_WINDOW + 5:
-            return None
-        z = np.full(n, np.nan)
-        for t in range(Z_WINDOW, n):
-            w_ = spread[t - Z_WINDOW:t]
-            sd = w_.std()
-            if sd > 1e-12:
-                z[t] = (spread[t] - w_.mean()) / sd
-
-        # positions in $ per $1 of unit size: leg i = -z, leg j = +z*beta
-        pos = 0.0
-        pnl = np.zeros(n)
-        gross = np.abs(1.0) + np.abs(beta)
-        for t in range(Z_WINDOW, n - 1):
-            zt = z[t]
-            if np.isfinite(zt) and abs(zt - (-pos)) > Z_BAND:
-                new_pos = -np.clip(zt, -Z_CAP, Z_CAP)
-            else:
-                new_pos = pos
-            turn = abs(new_pos - pos)
-            cost = turn * (COMM[i] + abs(beta) * COMM[j])
-            pos = new_pos
-            # next-day pnl of $pos in leg i, $-pos*beta... expressed via spread
-            ds = spread[t + 1] - spread[t]
-            pnl[t + 1] = pos * ds - cost
-        oos = pnl[max(split, Z_WINDOW + 1):]
-        full = pnl[Z_WINDOW + 1:]
-        sd, sdf = oos.std(), full.std()
-        if sd < 1e-12 or sdf < 1e-12:
-            return None
-        sharpe = np.sqrt(249) * oos.mean() / sd
-        sharpe_full = np.sqrt(249) * full.mean() / sdf
-        return sharpe, beta, half_life, spr_vol, adf_p, sharpe_full
-
-    results = []
-    for i in range(n_inst):
-        for j in range(i + 1, n_inst):
-            r = pair_backtest(i, j)
-            if r is not None:
-                results.append((r[0], i, j, cm[i, j], r[1], r[2], r[3],
-                                r[4], r[5]))
-    results.sort(key=lambda r: -r[0])
-
-    rep_path = f"{out_prefix}_pairs_report.txt"
-    with open(rep_path, "w") as f:
-        f.write("PAIRS / SPREAD ANALYSIS - ranked by OUT-OF-SAMPLE net Sharpe\n")
-        f.write("=" * 84 + "\n")
-        f.write(f"All {len(results)} pairs backtested with a z-score reversion "
-                f"rule (window {Z_WINDOW}d,\n")
-        f.write(f"cap {Z_CAP}, rebalance band {Z_BAND}), real commissions "
-                f"(1bp / 0.2bp ALGO).\n")
-        f.write(f"Hedge ratio fit on days 0-{split} (train); OOS Sharpe "
-                f"measured on days {split}-{n_days}.\n")
-        f.write("Full Sharpe covers the whole period (incl. the days beta was "
-                "fit on - flattering).\n")
-        f.write("A big Full-vs-OOS gap = relationship was luck or has "
-                "drifted. Rank by OOS.\n\n")
-        f.write(f"{'pair':<14}{'OOS Sharpe':>11}{'Full Sharpe':>12}"
-                f"{'ret corr':>10}{'beta':>8}"
-                f"{'ADF p':>8}{'half-life':>11}{'spr vol':>9}\n")
-        f.write("-" * 84 + "\n")
-        for s, i, j, c, beta, hl, sv, adf_p, sf in results[:40]:
-            name = f"{tickers[i]}/{tickers[j]}"
-            hl_s = f"{hl:.1f}" if np.isfinite(hl) else "inf"
-            f.write(f"{name:<14}{s:>+11.2f}{sf:>+12.2f}{c:>+10.3f}{beta:>8.2f}"
-                    f"{adf_p:>8.3f}{hl_s:>11}{sv:>9.4f}\n")
-
-        f.write("\n" + "=" * 84 + "\n")
-        strong = [r for r in results if r[0] > 1.0]
-        f.write(f"Pairs with OOS net Sharpe > 1.0: {len(strong)}\n")
-        f.write("Sanity notes:\n")
-        f.write("- With ~1275 pairs tested, expect a handful of OOS Sharpes "
-                "near +/-1 by pure luck.\n")
-        f.write("  Trust pairs where high OOS Sharpe coincides with low ADF p "
-                "and sensible half-life.\n")
-        f.write("- Check the same pair ranks well if you nudge Z_WINDOW; "
-                "fragile rankings are noise.\n")
-        f.write("- If ONE ticker appears near the top paired with many "
-                "different partners, the edge is\n")
-        f.write("  that single asset's own mean reversion, not a pairs "
-                "relationship - trade it outright\n")
-        f.write("  instead (cheaper: one leg of commission, not two).\n")
-
-    print(f"\nWrote: {cm_path}")
-    print(f"Wrote: {rep_path}")
-    if results:
-        s, i, j, c, beta, hl, sv, adf_p, sf = results[0]
-        print(f"Best OOS pair: {tickers[i]}/{tickers[j]} "
-              f"OOS Sharpe {s:+.2f} (full {sf:+.2f}, corr {c:+.3f}, "
-              f"ADF p {adf_p:.3f})")
-        print(f"Pairs with OOS net Sharpe > 1.0: "
-              f"{sum(1 for r in results if r[0] > 1.0)}")
-
-    # ---- full correlation matrix -> CSV ----
-    cm_path = f"{out_prefix}_corr_matrix.csv"
-    with open(cm_path, "w", newline="") as f:
-        w = csv.writer(f)
-        w.writerow([""] + tickers)
-        for i in range(n_inst):
-            w.writerow([tickers[i]] + [f"{cm[i, j]:.4f}" for j in range(n_inst)])
+    rets = np.diff(np.log(prc), axis=1)
+    w = None
+    last_fit = -10**9
+    resid = np.full(n_days - 1, np.nan)
+    for t in range(wfit, n_days - 1):
+        if w is None or (t - last_fit) >= refit:
+            X = rets[1:, t - wfit:t].T
+            y = rets[0, t - wfit:t]
+            w = ols(X, y)
+            last_fit = t
+        resid[t] = rets[0, t] - w @ rets[1:, t]
+    return resid
 
 
 def main(path):
     prc, tickers = load_prices(path)
     n_inst, n_days = prc.shape
-    rets = np.diff(np.log(prc), axis=1)
+    log_p = np.log(prc)
+    rets = np.diff(log_p, axis=1)
 
-    print("=" * 64)
-    print("1. BASICS")
-    print("=" * 64)
-    print(f"Assets: {n_inst}   Days: {n_days}")
-    vol = rets.std(axis=1)
-    print(f"Daily vol  - ALGO: {vol[0]:.4f}   others: "
-          f"min {vol[1:].min():.4f}  median {np.median(vol[1:]):.4f}  "
-          f"max {vol[1:].max():.4f}")
-    drift = rets.mean(axis=1)
-    print(f"Daily drift- ALGO: {drift[0]:+.5f}  others median: "
-          f"{np.median(drift[1:]):+.5f}")
+    d500 = min(500, int(n_days * 2 / 3))
+    dB = min(650, n_days - 100)
 
+    # ================================================================
+    print("=" * 70)
+    print("1. RANGE-BOUND TEST (ADF on log price + Hurst exponent)")
+    print("=" * 70)
+    print(f"  ADF p < 0.05 => price level is stationary (range-bound)")
+    print(f"  Hurst < 0.5 => mean-reverting, > 0.5 => trending, ~0.5 => random")
     print()
-    print("=" * 64)
-    print("2. REVERSION vs MOMENTUM (return autocorrelation)")
-    print("=" * 64)
-    print("Negative lag-1 autocorr => mean reversion; positive => momentum")
-    for lag in (1, 2, 3, 5):
-        acs = np.array([autocorr(rets[i], lag) for i in range(n_inst)])
-        n_neg = (acs[1:] < 0).sum()
-        print(f"lag {lag}:  ALGO {acs[0]:+.3f} | others: "
-              f"mean {np.nanmean(acs[1:]):+.3f}, "
-              f"{n_neg}/50 negative, "
-              f"strongest neg {np.nanmin(acs[1:]):+.3f}, "
-              f"strongest pos {np.nanmax(acs[1:]):+.3f}")
+    print(f"  {'ticker':<8} {'ADF p':>7} {'Hurst':>7}  verdict")
+    print(f"  {'-'*40}")
 
-    # Multi-horizon: does past k-day return predict next-day return?
-    print("\nPast k-day return vs next-day return (pooled corr):")
-    for k in (3, 5, 10, 20, 40):
-        past = np.array([np.convolve(rets[i], np.ones(k), "valid")
-                         for i in range(n_inst)])[:, :-1]
-        fwd = rets[:, k:]
-        c = np.corrcoef(past.ravel(), fwd.ravel())[0, 1]
-        print(f"  k={k:>2}: {c:+.4f}")
+    stationary = []
+    hurst_vals = []
+    adf_ps = []
+    for i in range(n_inst):
+        try:
+            p_adf = adfuller(log_p[i], autolag='AIC')[1]
+        except Exception:
+            p_adf = np.nan
+        h = hurst(log_p[i])
+        hurst_vals.append(h)
+        adf_ps.append(p_adf)
+        if p_adf < 0.05:
+            stationary.append(i)
+            verdict = "RANGE-BOUND ***"
+        elif p_adf < 0.10:
+            verdict = "weak range-bound"
+        elif h < 0.4:
+            verdict = "mean-reverting (returns)"
+        elif h > 0.6:
+            verdict = "trending"
+        else:
+            verdict = "random walk"
+        print(f"  {tickers[i]:<8} {p_adf:>7.3f} {h:>7.3f}  {verdict}")
 
+    print(f"\n  Stationary (range-bound) assets: {len(stationary)}")
+    print(f"  Mean Hurst across all: {np.mean(hurst_vals):.3f}")
+
+    # ================================================================
     print()
-    print("=" * 64)
-    print("3. ALGO STRUCTURE & LEAD-LAG")
-    print("=" * 64)
-    algo = rets[0]
-    others = rets[1:]
-    # Contemporaneous correlation of each asset with ALGO
-    c_now = np.array([np.corrcoef(algo, others[i])[0, 1]
-                      for i in range(50)])
-    print(f"Contemporaneous corr with ALGO: mean {c_now.mean():+.3f}, "
-          f"max |{np.abs(c_now).max():.3f}|")
-    # Others today -> ALGO tomorrow
-    c_lead = np.array([np.corrcoef(others[i][:-1], algo[1:])[0, 1]
-                       for i in range(50)])
-    order = np.argsort(-np.abs(c_lead))
-    print("Top 5 assets whose TODAY return predicts ALGO TOMORROW:")
-    for i in order[:5]:
-        print(f"  asset {i+1:>2}: corr {c_lead[i]:+.3f}")
-    # ALGO today -> others tomorrow
-    c_lag = np.array([np.corrcoef(algo[:-1], others[i][1:])[0, 1]
-                      for i in range(50)])
-    order = np.argsort(-np.abs(c_lag))
-    print("Top 5 assets that FOLLOW ALGO with one day lag:")
-    for i in order[:5]:
-        print(f"  asset {i+1:>2}: corr {c_lag[i]:+.3f}")
-
+    print("=" * 70)
+    print("2. PRICE RATIO / COINTEGRATION TESTS")
+    print("=" * 70)
+    print("  Testing log price ratios for stationarity.")
+    print("  A stationary ratio means two assets move together in level.")
     print()
-    print("=" * 64)
-    print("4. FACTOR STRUCTURE (PCA on return correlation)")
-    print("=" * 64)
-    cm = np.corrcoef(rets)
-    off = cm[np.triu_indices(n_inst, k=1)]
-    print(f"Pairwise corr: mean {off.mean():+.3f}, "
-          f"5%/95%: {np.percentile(off, 5):+.3f} / {np.percentile(off, 95):+.3f}")
-    evals = np.linalg.eigvalsh(cm)[::-1]
-    share = evals / evals.sum()
-    print(f"Top PCA factors explain: "
-          f"{share[0]:.1%}, {share[1]:.1%}, {share[2]:.1%} "
-          f"(equal-weight baseline would be {1/n_inst:.1%} each)")
 
+    # Test all pairs involving stationary assets or ALGO
+    test_set = list(set(stationary + [0]))
+    results = []
+    for i in test_set:
+        for j in range(n_inst):
+            if j <= i:
+                continue
+            try:
+                # Engle-Granger cointegration test
+                _, p_coint, _ = coint(log_p[i], log_p[j])
+                # Simple ratio stationarity
+                ratio = log_p[i] - log_p[j]
+                p_ratio = adfuller(ratio, autolag='AIC')[1]
+                results.append((min(p_coint, p_ratio), i, j,
+                                p_coint, p_ratio))
+            except Exception:
+                pass
+    results.sort()
+    if results:
+        print(f"  {'pair':<14} {'coint p':>9} {'ratio p':>9}  flag")
+        print(f"  {'-'*50}")
+        for best_p, i, j, pc, pr in results[:20]:
+            flag = " ***" if best_p < 0.05 else (" *" if best_p < 0.10 else "")
+            print(f"  {tickers[i]}/{tickers[j]:<8} {pc:>9.3f} {pr:>9.3f}{flag}")
+    else:
+        print("  No pairs tested (no stationary assets or ALGO found).")
+
+    # ================================================================
     print()
-    print("=" * 64)
-    print("5. QUICK SIGNAL ICs (cross-sectional, next-day returns)")
-    print("=" * 64)
-    fwd = rets[:, 1:]
+    print("=" * 70)
+    print("3. ALGO RESIDUAL ANALYSIS")
+    print("=" * 70)
 
-    def trailing_sum(k):
-        return np.array([np.convolve(rets[i], np.ones(k), "valid")
-                         for i in range(n_inst)])[:, :-1]
+    resid = rolling_algo_resid(prc)
+    r = resid[WARM:]
+    r = r[np.isfinite(r)]
 
-    for name, k, sign in (("5d reversal", 5, -1), ("10d reversal", 10, -1),
-                          ("20d momentum", 20, +1), ("40d momentum", 40, +1)):
-        sig = sign * trailing_sum(k)
-        m, t = rank_ic(sig, fwd[:, k - 1:])
-        verdict = "***" if abs(t) > 3 else ("*" if abs(t) > 2 else "")
-        print(f"  {name:>12}: mean IC {m:+.4f}  (t-stat {t:+.1f}) {verdict}")
+    print(f"  Residual vol: {r.std():.5f}/day  (${r.std()*CAPS[0]:,.0f} at $100k)")
 
-    print("\nPositive IC with good t-stat => signal predicts returns.")
-    print("If reversal ICs dominate, weight W_REV up; if momentum, W_MOM.")
+    # Is the residual itself stationary?
+    try:
+        p_adf_r = adfuller(r, autolag='AIC')[1]
+        h_r = hurst(r)
+        print(f"  Residual ADF p: {p_adf_r:.4f}  Hurst: {h_r:.3f}")
+        if p_adf_r < 0.05:
+            print("  >>> RESIDUAL IS STATIONARY - mean reverts in level! <<<")
+        elif h_r < 0.45:
+            print("  Residual mean-reverts in returns (consistent with our finding)")
+        else:
+            print("  Residual is a random walk - no structural edge here")
+    except Exception as e:
+        print(f"  ADF failed: {e}")
 
+    # Which asset LEVELS predict the residual?
     print()
-    print("=" * 64)
-    print("6. CORRELATION MATRIX & PAIRS (written to files)")
-    print("=" * 64)
-    pairs_analysis(prc, rets, tickers)
+    print("  Which log-price levels best predict the ALGO residual?")
+    print(f"  {'ticker':<8} {'corr(level,resid)':>18} {'corr(lag1,resid)':>18}")
+    print(f"  {'-'*50}")
+    level_corrs = []
+    for i in range(1, n_inst):
+        lp_i = log_p[i, WARM:-1]       # align with resid
+        res_i = resid[WARM:]
+        res_i = res_i[:len(lp_i)]
+        ok = np.isfinite(res_i)
+        if ok.sum() < 30:
+            continue
+        c_now = np.corrcoef(lp_i[ok], res_i[ok])[0, 1]
+        # lagged: does asset i level today predict residual tomorrow?
+        res_lag = resid[WARM + 1:]
+        res_lag = res_lag[:len(lp_i) - 1]
+        ok2 = np.isfinite(res_lag)
+        c_lag = np.corrcoef(lp_i[:-1][ok2], res_lag[ok2])[0, 1]
+        level_corrs.append((abs(c_now) + abs(c_lag), i, c_now, c_lag))
+    level_corrs.sort(reverse=True)
+    for _, i, c_now, c_lag in level_corrs[:15]:
+        flag = " *" if max(abs(c_now), abs(c_lag)) > 0.3 else ""
+        print(f"  {tickers[i]:<8} {c_now:>+18.4f} {c_lag:>+18.4f}{flag}")
+
+    # ================================================================
+    print()
+    print("=" * 70)
+    print("4. WALK-FORWARD: TRADE ALGO ON ITS OWN RESIDUAL MEAN REVERSION")
+    print("=" * 70)
+
+    # Roll a 60-day window; trade when residual > 1 std from mean
+    WIN = 60
+    pos = 0.0
+    pnl = np.zeros(n_days)
+    for t in range(WARM + WIN, n_days - 1):
+        win = resid[t - WIN:t]
+        win = win[np.isfinite(win)]
+        if len(win) < 10:
+            continue
+        r_now = resid[t]
+        if not np.isfinite(r_now):
+            continue
+        mu_w, sd_w = win.mean(), win.std()
+        if sd_w < 1e-12:
+            continue
+        z = (r_now - mu_w) / sd_w
+        # fade: if residual is high, expect ALGO to underperform tomorrow
+        new_pos = -np.tanh(2.0 * z) * CAPS[0]
+        cost = abs(new_pos - pos) * COMM[0]
+        pos = new_pos
+        pnl[t + 1] = pos * rets[0, t] - cost
+
+    start = WARM + WIN
+    segs = [(f"A[{start}-{d500}]", pnl[start:d500]),
+            (f"B[{d500}-{dB}]",   pnl[d500:dB]),
+            (f"C[{dB}-{n_days}]", pnl[dB:n_days]),
+            ("full",              pnl[start:])]
+    if n_days > 800:
+        segs.append((f"LEADERBOARD[750-{n_days}]", pnl[750:]))
+    for name, p in segs:
+        mu, sd = p.mean(), p.std()
+        sr = np.sqrt(250) * mu / sd if sd > 1e-12 else 0
+        print(f"  {name:<26} mu ${mu:>6,.0f}  sd ${sd:>6,.0f}  "
+              f"SR {sr:>5.2f}  Score {objective(p):>6,.0f}")
 
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
-        print("Usage: python explore.py prices.txt")
+        print("Usage: python range_analysis.py prices.txt")
         sys.exit(1)
     main(sys.argv[1])
