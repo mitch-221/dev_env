@@ -28,16 +28,17 @@ CAPS = np.full(N_INST, 10_000.0)
 CAPS[0] = 100_000.0
 
 # ---- Component 1: index arb ----
-ARB_WFIT = 250        # rolling OLS window (returns) for weights
+ARB_WFIT = 150        # rolling OLS window (returns) for weights
 ARB_REFIT = 5         # days between weight refits
-ARB_ZW = 5            # z-score window for the spread
+ARB_ZW = 30           # z-score window (match ~10d spread half-life)
+ARB_DEADBAND = 0.5    # no position until |z| exceeds this (soft threshold)
 ARB_SCALE = 100_000.0 # ALGO leg size at full signal
 ARB_RIDGE = 1e-6
 
 # ---- Component 2: factor-resid reversion ----
 NF = 2
 H = 3
-FITW = 250
+FITW = 150
 REFIT_EVERY = 20
 VOL_NORM = True
 VOL_WIN = 60
@@ -100,7 +101,8 @@ def getMyPosition(prcSoFar):
     s_sd = s_win.std()
     if s_sd > 1e-12:
         z = (s_now - s_win.mean()) / s_sd
-        f = np.tanh(z)
+        zz = np.sign(z) * max(abs(z) - ARB_DEADBAND, 0.0)
+        f = np.tanh(zz)
     else:
         f = 0.0
     arb_dollars = np.zeros(n_inst)
