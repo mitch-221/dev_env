@@ -1,30 +1,29 @@
 """
-Algothon final submission strategy.
+MTAlpha Algothon strategy: 11 structural pairs + factor-residual reversion.
 
-THREE COMPONENTS, each independently validated on out-of-sample data:
+COMPONENT 1 - 11 COINTEGRATED PAIRS
+  All pairs confirmed with ratio ADF p<0.01 AND positive out-of-sample
+  Sharpe in both segments B[500-650] AND C[650-750] independently.
+  Discovered via: ADF scan, SSD distance, Engle-Granger cointegration.
+  Each pair trades the log price ratio as a z-score, sized to caps.
 
-1. FACTOR-RESIDUAL CROSS-SECTIONAL REVERSION (assets 1-50)
-   Strip top-2 PCA factors from 3-day returns, vol-normalise,
-   trade the cross-sectional z-score. Validated: positive in all
-   rolling windows, noise-benchmark tested, SR ~1.2 full-sample.
+  Pairs (ticker_i, ticker_j, z_window, band):
+    CTGI/EELT  (25,37) zw=40 band=0.5  - half-life 7.1d
+    RTTH/NAYO  (18,35) zw=40 band=0.75 - half-life 7.9d
+    HETT/ULXY  ( 7,40) zw=30 band=0.5  - half-life 5.4d
+    EORC/NGTE  (13,45) zw=40 band=0.75 - half-life 5.4d
+    MHRM/EAFC  (49,50) zw=40 band=0.3  - half-life SSD match
+    SMAH/ILVX  (10,46) zw=30 band=0.75 - half-life SSD match
+    HUXZ/ACAC  ( 8,27) zw=30 band=0.3  - half-life 5.2d
+    AENO/NWIG  ( 1,20) zw=20 band=1.0  - half-life 4.5d
+    ACIX/ITPA  (31,43) zw=20 band=0.3  - half-life 8.8d
+    FWWG/BLBT  (36,41) zw=30 band=0.3  - half-life SSD match
+    MTNS/BENI  (33,42) zw=40 band=1.0  - half-life 11.0d
 
-2. CTGI/EELT STRUCTURAL PAIR (assets 25 & 37)
-   Log price ratio ADF p=0.000, half-life 7.1d, ratio std 0.092.
-   Walk-forward z-score trade on the ratio. SR 2.67 full-sample,
-   positive in A, B and C independently.
-
-3. MTNS/BENI STRUCTURAL PAIR (assets 33 & 42)
-   Log price ratio ADF p=0.000, half-life 11.0d.
-   SR 1.48 full-sample, positive in A, B and C independently.
-
-Pairs deliberately excluded despite high B scores:
-   EELT cluster (12 pairs) — B=443 but C=-334, regime break at
-   day 650, would damage hidden-window performance.
-
-Ticker index mapping (0-based):
-   CTGI=25, EELT=37, MTNS=33, BENI=42
-
-Rename to <yourteamname>.py to submit.
+COMPONENT 2 - FACTOR-RESIDUAL CROSS-SECTIONAL REVERSION
+  Strip top-2 PCA factors from 3-day vol-normalised returns,
+  trade the cross-sectional z-score across all 51 assets.
+  Adds uncorrelated alpha on assets not consumed by pairs.
 """
 
 import numpy as np
@@ -33,24 +32,32 @@ N_INST = 51
 CAPS   = np.full(N_INST, 10_000.0)
 CAPS[0] = 100_000.0
 
-# ---- Component 1: factor-residual reversion ----
-NF          = 2      # PCA factors to strip
-H           = 3      # reversion horizon (days)
-FITW        = 250    # factor fit window
-REFIT_EVERY = 20     # days between factor refits
-VOL_WIN     = 60     # vol normalisation window
-AGGR        = 2.0    # tanh steepness
-RESID_BAND  = 0.15   # rebalance band (fraction of cap)
-
-# ---- Component 2 & 3: structural pairs ----
-# (i, j, z_window, band) — tuned on B, confirmed positive on C
+# ---- Structural pairs: (i, j, z_window, band) ----
 PAIRS = [
-    (25, 37, 40, 0.5),   # CTGI/EELT: half-life 7.1d
-    (33, 42, 40, 1.0),   # MTNS/BENI: half-life 11.0d
+    (25, 37, 40, 0.50),   # CTGI/EELT
+    (18, 35, 40, 0.75),   # RTTH/NAYO
+    ( 7, 40, 30, 0.50),   # HETT/ULXY
+    (13, 45, 40, 0.75),   # EORC/NGTE
+    (49, 50, 40, 0.30),   # MHRM/EAFC
+    (10, 46, 30, 0.75),   # SMAH/ILVX
+    ( 8, 27, 30, 0.30),   # HUXZ/ACAC
+    ( 1, 20, 20, 1.00),   # AENO/NWIG
+    (31, 43, 20, 0.30),   # ACIX/ITPA
+    (36, 41, 30, 0.30),   # FWWG/BLBT
+    (33, 42, 40, 1.00),   # MTNS/BENI
 ]
-PAIR_AGGR = 4.0
+PAIR_AGGR = 2.0
 
-MIN_HISTORY = max(FITW, 40) + 10
+# ---- Factor-residual signal ----
+NF          = 2
+H           = 3
+FITW        = 250
+REFIT_EVERY = 20
+VOL_WIN     = 60
+AGGR        = 2.0
+RESID_BAND  = 0.15
+
+MIN_HISTORY = max(FITW, max(zw for _,_,zw,_ in PAIRS)) + 10
 
 _pos      = np.zeros(N_INST, dtype=int)
 _last_n   = 0
@@ -71,7 +78,7 @@ def getMyPosition(prcSoFar):
     p_today = prc[:, -1]
     max_sh  = np.floor(CAPS / p_today).astype(int)
 
-    if n_days <= _last_n:           # fresh run: reset state
+    if n_days <= _last_n:
         _pos     = np.zeros(N_INST, dtype=int)
         _V       = None
         _fit_day = -10**9
@@ -87,7 +94,25 @@ def getMyPosition(prcSoFar):
     target_dollars = np.zeros(N_INST)
 
     # =========================================================
-    # Component 1: factor-residual reversion (all 51 assets)
+    # Component 1: structural pairs
+    # =========================================================
+    for i, j, zw, band in PAIRS:
+        if max(i, j) >= n_inst or n_days < zw + 5:
+            continue
+        ratio_win = log_p[i, -zw:] - log_p[j, -zw:]
+        s_mean = ratio_win[:-1].mean()
+        s_sd   = ratio_win[:-1].std()
+        if s_sd < 1e-12:
+            continue
+        z = (ratio_win[-1] - s_mean) / s_sd
+        if abs(z) <= band:
+            continue
+        f = np.tanh(PAIR_AGGR * z)
+        target_dollars[i] -= f * CAPS[i]
+        target_dollars[j] += f * CAPS[j]
+
+    # =========================================================
+    # Component 2: factor-residual reversion
     # =========================================================
     if _V is None or (n_days - _fit_day) >= REFIT_EVERY:
         R  = rets[:, -FITW:]
@@ -104,39 +129,20 @@ def getMyPosition(prcSoFar):
     target_dollars += expo * CAPS
 
     # =========================================================
-    # Component 2 & 3: structural pairs
-    # =========================================================
-    for i, j, zw, band in PAIRS:
-        if max(i, j) >= n_inst or n_days < zw + 5:
-            continue
-        ratio_win = log_p[i, -zw:] - log_p[j, -zw:]
-        s_mean = ratio_win[:-1].mean()
-        s_sd   = ratio_win[:-1].std()
-        if s_sd < 1e-12:
-            continue
-        z = (ratio_win[-1] - s_mean) / s_sd
-        if abs(z) <= band:
-            continue
-        f = np.tanh(PAIR_AGGR * z)
-        # z > 0: i is expensive -> short i, long j
-        target_dollars[i] -= f * CAPS[i]
-        target_dollars[j] += f * CAPS[j]
-
-    # =========================================================
-    # Clip combined target to caps
+    # Clip and execute
     # =========================================================
     target_dollars = np.clip(target_dollars, -CAPS, CAPS)
     target_sh = np.round(target_dollars / p_today).astype(int)
     target_sh = np.clip(target_sh, -max_sh, max_sh)
 
-    # Rebalance band: smaller for pairs (fast signal), larger for resid
+    # Tighter band for pairs (fast signal), wider for resid
     band_arr = np.full(N_INST, RESID_BAND)
-    for i, j, _, _ in PAIRS:
-        band_arr[i] = 0.05
-        band_arr[j] = 0.05
+    pair_assets = set(i for i,j,_,_ in PAIRS) | set(j for i,j,_,_ in PAIRS)
+    for idx in pair_assets:
+        band_arr[idx] = 0.05
 
-    drift  = np.abs(target_sh - _pos) * p_today
-    trade  = drift > band_arr * CAPS
+    drift   = np.abs(target_sh - _pos) * p_today
+    trade   = drift > band_arr * CAPS
     new_pos = _pos.copy()
     new_pos[trade] = target_sh[trade]
     new_pos = np.clip(new_pos, -max_sh, max_sh)
