@@ -39,7 +39,7 @@ H           = 3      # reversion horizon (days)
 FITW        = 250    # factor fit window
 REFIT_EVERY = 20     # days between factor refits
 VOL_WIN     = 60     # vol normalisation window
-AGGR        = 3.0    # tanh steepness
+AGGR        = 2.0    # tanh steepness
 RESID_BAND  = 0.15   # rebalance band (fraction of cap)
 
 # ---- Component 2 & 3: structural pairs ----
@@ -48,7 +48,7 @@ PAIRS = [
     (25, 37, 40, 0.5),   # CTGI/EELT: half-life 7.1d
     (33, 42, 40, 1.0),   # MTNS/BENI: half-life 11.0d
 ]
-PAIR_AGGR = 2.0
+PAIR_AGGR = 4.0
 
 MIN_HISTORY = max(FITW, 40) + 10
 
