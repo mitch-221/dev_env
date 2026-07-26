@@ -39,7 +39,7 @@ H           = 3      # reversion horizon (days)
 FITW        = 250    # factor fit window
 REFIT_EVERY = 20     # days between factor refits
 VOL_WIN     = 60     # vol normalisation window
-AGGR        = 4.0    # tanh steepness
+AGGR        = 3.0    # tanh steepness
 RESID_BAND  = 0.15   # rebalance band (fraction of cap)
 
 # ---- Component 2 & 3: structural pairs ----
