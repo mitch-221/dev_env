@@ -1,14 +1,17 @@
 """
-MTAlpha — 22 pairs, per-pair optimised AGGR, rebal_band=0.
-Simulation score: ~921. Official eval target: 890+.
+MTAlpha Maximum — 22 core pairs + 4 half-cap split pairs = 26 total.
+Simulation score: ~1035. Official eval target: 900+.
 
-Key changes vs 884-scoring version:
-- RTTH/NAYO AGGR: 20→100 (+3 sim points)
-- FWWG/BLBT params: zw=10,b=0.20→zw=60,b=0.05 (+0.6)
-- ACIX/ITPA: zw=30,b=0.50→zw=25,b=0.30,AGGR=50 (+0.2)
-- IHOZ/EAFC: zw=60,b=0.75,AGGR=5→zw=40,b=0.40,AGGR=50 (+1.8)
-- REBAL_BAND: 0.05→0.00 (+5 official points)
+New additions (free asset vs used partner at half cap):
+  RRES/RTTH:  RRES (free) + RTTH at $5k  — score +29
+  MSDP/NWIG:  MSDP (free) + NWIG at $5k  — score +29
+  AGVF/DUCT:  AGVF (free) + DUCT at $5k  — score +22
+  HTRK/CUBO:  HTRK (free) + CUBO at $5k  — score +10
 
+Note: cap fractions — used asset gets half ($5k), free asset gets full ($10k).
+The combined exposure stays within caps through the clip in getMyPosition.
+
+eval.py: set numTestDays = 250 to score days 751-1000.
 Rename to <yourteamname>.py to submit.
 """
 
@@ -18,34 +21,40 @@ N_INST = 51
 CAPS   = np.full(N_INST, 10_000.0)
 CAPS[0] = 100_000.0
 
-# (i, j, zw, band, aggr) — all individually tuned
+# (i, j, zw, band, aggr, cap_i, cap_j)
 PAIRS = [
-    ( 0, 40, 40, 0.00,  20.0),   # ALGO/ULXY
-    (18, 35, 15, 0.00, 100.0),   # RTTH/NAYO  ← AGGR=100
-    ( 1, 20, 40, 0.20,  20.0),   # AENO/NWIG
-    (10, 46, 60, 0.10,  20.0),   # SMAH/ILVX
-    (39, 47, 60, 0.00,  20.0),   # AETS/FCSG
-    (30, 48, 30, 0.50,  20.0),   # RCRI/FARS
-    (25, 37, 60, 0.75,  20.0),   # CTGI/EELT
-    (13, 45, 30, 0.30,  20.0),   # EORC/NGTE
-    (15, 22, 30, 0.20,  20.0),   # HRET/MDGI
-    (17, 29, 50, 0.30,  20.0),   # DIHO/GARI
-    ( 7, 49, 50, 0.10,  15.0),   # HETT/MHRM
-    (14, 33, 15, 0.00,  12.0),   # CUBO/MTNS
-    ( 4,  8, 40, 0.30,  20.0),   # ELLT/HUXZ
-    (27, 32, 40, 0.30,  20.0),   # ACAC/CCNS
-    ( 2, 42, 20, 0.00,  20.0),   # LSST/BENI
-    ( 6, 16, 50, 1.00,  20.0),   # OTCS/ANSO
-    (28, 38, 10, 0.30,  12.0),   # SRTX/HRND
-    ( 9, 11, 30, 1.00,  20.0),   # DUCT/NPCK
-    (36, 41, 60, 0.05,  20.0),   # FWWG/BLBT  ← retuned
-    (31, 43, 25, 0.30,  50.0),   # ACIX/ITPA  ← AGGR=50
-    ( 3, 19, 60, 0.75,  25.0),   # SRNA/SPLZ
-    (34, 50, 40, 0.40,  50.0),   # IHOZ/EAFC  ← AGGR=50
+    # === Core 22 pairs (all at full cap) ===
+    ( 0, 40, 40, 0.00,  20.0, 100000, 10000),  # ALGO/ULXY
+    (18, 35, 15, 0.00, 100.0,  10000, 10000),  # RTTH/NAYO
+    ( 1, 20, 40, 0.20,  20.0,  10000, 10000),  # AENO/NWIG
+    (10, 46, 60, 0.10,  20.0,  10000, 10000),  # SMAH/ILVX
+    (39, 47, 60, 0.00,  20.0,  10000, 10000),  # AETS/FCSG
+    (30, 48, 30, 0.50,  20.0,  10000, 10000),  # RCRI/FARS
+    (25, 37, 60, 0.75,  20.0,  10000, 10000),  # CTGI/EELT
+    (13, 45, 30, 0.30,  20.0,  10000, 10000),  # EORC/NGTE
+    (15, 22, 30, 0.20,  20.0,  10000, 10000),  # HRET/MDGI
+    (17, 29, 50, 0.30,  20.0,  10000, 10000),  # DIHO/GARI
+    ( 7, 49, 50, 0.10,  15.0,  10000, 10000),  # HETT/MHRM
+    (14, 33, 15, 0.00,  12.0,  10000, 10000),  # CUBO/MTNS
+    ( 4,  8, 40, 0.30,  20.0,  10000, 10000),  # ELLT/HUXZ
+    (27, 32, 40, 0.30,  20.0,  10000, 10000),  # ACAC/CCNS
+    ( 2, 42, 20, 0.00,  20.0,  10000, 10000),  # LSST/BENI
+    ( 6, 16, 50, 1.00,  20.0,  10000, 10000),  # OTCS/ANSO
+    (28, 38, 10, 0.30,  12.0,  10000, 10000),  # SRTX/HRND
+    ( 9, 11, 30, 1.00,  20.0,  10000, 10000),  # DUCT/NPCK
+    (36, 41, 60, 0.05,  20.0,  10000, 10000),  # FWWG/BLBT
+    (31, 43, 25, 0.30,  50.0,  10000, 10000),  # ACIX/ITPA
+    ( 3, 19, 60, 0.75,  25.0,  10000, 10000),  # SRNA/SPLZ
+    (34, 50, 40, 0.40,  50.0,  10000, 10000),  # IHOZ/EAFC
+    # === 4 half-cap split pairs (free asset full, used partner half) ===
+    (24, 18,  8, 0.10,  30.0,  10000,  5000),  # RRES/RTTH(half)
+    (12, 20, 40, 0.05,  30.0,  10000,  5000),  # MSDP/NWIG(half)
+    (23,  9, 40, 0.00,  30.0,  10000,  5000),  # AGVF/DUCT(half)
+    (44, 14, 30, 0.10,  30.0,  10000,  5000),  # HTRK/CUBO(half)
 ]
 
-REBAL_BAND  = 0.00   # ← zero band: trade every time signal changes
-MIN_HISTORY = max(int(zw) for _,_,zw,_,_ in PAIRS) + 10
+REBAL_BAND  = 0.00
+MIN_HISTORY = max(int(zw) for _,_,zw,_,_,_,_ in PAIRS) + 10
 
 _pos    = np.zeros(N_INST, dtype=int)
 _last_n = 0
@@ -70,7 +79,7 @@ def getMyPosition(prcSoFar):
     log_p = np.log(prc)
     target_dollars = np.zeros(N_INST)
 
-    for i, j, zw, band, aggr in PAIRS:
+    for i, j, zw, band, aggr, ci, cj in PAIRS:
         if max(i, j) >= n_inst or n_days < zw + 5:
             continue
         ratio_win = log_p[i, -zw:] - log_p[j, -zw:]
@@ -82,16 +91,12 @@ def getMyPosition(prcSoFar):
         if abs(z) <= band:
             continue
         f = np.tanh(aggr * z)
-        target_dollars[i] -= f * CAPS[i]
-        target_dollars[j] += f * CAPS[j]
+        target_dollars[i] -= f * ci
+        target_dollars[j] += f * cj
 
     target_dollars = np.clip(target_dollars, -CAPS, CAPS)
     target_sh = np.round(target_dollars / p_today).astype(int)
     target_sh = np.clip(target_sh, -max_sh, max_sh)
 
-    # No rebalance threshold — always move to target
-    new_pos = target_sh
-    new_pos = np.clip(new_pos, -max_sh, max_sh)
-
-    _pos = new_pos
-    return new_pos.copy()
+    _pos = target_sh
+    return _pos.copy()
