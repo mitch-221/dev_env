@@ -1,12 +1,13 @@
 """
-MTAlpha v8 — 26 cointegrated pairs, optimized portfolio.
-Target eval score: ~918. Validated on prices.txt.
+MTAlpha Final — 21 pairs with per-pair optimised signal methods.
+Eval score: ~904. Mean PnL: ~$913/day. SR: ~9.74.
 
-All pairs confirmed positive on B[500-650] AND C[650-750] independently.
-Uses cap-splitting where assets appear in multiple pairs.
+Each pair uses the signal method that scored best on B[500-650]:
+- baseline: simple rolling z-score
+- predict:  z-score with acceleration dampening + vol scaling
+- ou:       Ornstein-Uhlenbeck AR(1) fitted mean reversion speed
 
-PAIRS format: (i, j, z_window, band, cap_i_fraction, cap_j_fraction)
-Default cap fractions = 1.0 (full cap).
+Per-pair config: (i, j, method, params...)
 """
 
 import numpy as np
@@ -15,43 +16,34 @@ N_INST = 51
 CAPS   = np.full(N_INST, 10_000.0)
 CAPS[0] = 100_000.0
 
-# (i, j, zw, band, fi, fj) — fi/fj are cap fractions (1.0 = full)
+# (i, j, method, zw, band, aggr)
+# method: 0=baseline, 1=predict, 2=ou
 PAIRS = [
-    # --- Core disjoint pairs (full caps) ---
-    ( 0, 22, 20, 0.30, 1.0, 1.0),   # ALGO/MDGI
-    (25, 37, 40, 0.30, 1.0, 1.0),   # CTGI/EELT
-    (18, 35, 40, 0.75, 1.0, 1.0),   # RTTH/NAYO
-    (13, 45, 40, 0.50, 1.0, 1.0),   # EORC/NGTE
-    ( 8, 20, 20, 0.75, 1.0, 1.0),   # HUXZ/NWIG (NWIG split below)
-    (49, 50, 40, 0.30, 1.0, 1.0),   # MHRM/EAFC (MHRM split below)
-    (10, 46, 30, 0.75, 1.0, 1.0),   # SMAH/ILVX (SMAH split below)
-    ( 9, 27, 20, 1.00, 1.0, 1.0),   # DUCT/ACAC
-    (36, 41, 30, 0.30, 1.0, 1.0),   # FWWG/BLBT
-    (39, 44, 30, 0.75, 1.0, 1.0),   # AETS/HTRK
-    (31, 43, 20, 0.30, 1.0, 1.0),   # ACIX/ITPA
-    ( 7, 33, 20, 0.30, 1.0, 1.0),   # HETT/MTNS
-    ( 2, 16, 20, 1.00, 1.0, 1.0),   # LSST/ANSO
-    ( 4, 17, 30, 1.00, 1.0, 1.0),   # ELLT/DIHO
-    (26, 32, 40, 1.00, 1.0, 1.0),   # ALUT/CCNS
-    # --- Free/free pairs ---
-    ( 1, 29, 15, 0.20, 1.0, 1.0),   # AENO/GARI
-    (38, 19, 20, 0.50, 1.0, 1.0),   # HRND/SPLZ
-    (21, 11, 40, 0.60, 1.0, 1.0),   # MMBT/NPCK
-    (47, 3,  50, 1.00, 1.0, 1.0),   # FCSG/SRNA
-    # --- Shared-cap pairs (ULXY split 3 ways) ---
-    (12, 40, 40, 1.00, 1.0, 1.0),   # MSDP/ULXY  (ULXY at $10k)
-    (42, 40, 40, 0.75, 1.0, 0.5),   # BENI/ULXY  (ULXY at $5k)
-    # --- Cross-cluster half-cap pairs ---
-    (15, 10, 30, 0.30, 1.0, 0.5),   # HRET/SMAH  (SMAH at $5k)
-    (29, 20, 20, 0.30, 0.5, 0.5),   # GARI/NWIG  (both at $5k)
-    (28, 49, 40, 0.75, 1.0, 0.5),   # SRTX/MHRM  (MHRM at $5k)
-    # --- Remaining free asset pairs ---
-    (23, 30, 15, 1.50, 1.0, 1.0),   # AGVF/RCRI
-    ( 5, 14, 50, 0.50, 1.0, 1.0),   # AMRP/CUBO
+    ( 0, 22, 0, 20,  0.30, 2.0),   # ALGO/MDGI    baseline
+    (25, 37, 1, 40,  0.30, 2.0),   # CTGI/EELT    predict
+    (18, 35, 1, 40,  0.75, 2.0),   # RTTH/NAYO    predict
+    (13, 45, 2, 100, 0.50, 3.0),   # EORC/NGTE    ou zw=100
+    ( 8, 20, 2, 100, 0.75, 1.5),   # HUXZ/NWIG    ou zw=100
+    (49, 50, 0, 40,  0.30, 2.0),   # MHRM/EAFC    baseline
+    (10, 46, 0, 30,  0.75, 2.0),   # SMAH/ILVX    baseline
+    ( 9, 27, 2, 100, 1.00, 3.0),   # DUCT/ACAC    ou zw=100
+    (36, 41, 0, 30,  0.30, 2.0),   # FWWG/BLBT    baseline
+    (39, 44, 1, 30,  0.55, 2.0),   # AETS/HTRK    predict
+    (31, 43, 0, 20,  0.30, 2.0),   # ACIX/ITPA    baseline
+    ( 7, 33, 0, 20,  0.30, 2.0),   # HETT/MTNS    baseline
+    ( 2, 16, 2, 100, 1.00, 3.0),   # LSST/ANSO    ou zw=100
+    ( 4, 17, 2, 100, 1.00, 3.0),   # ELLT/DIHO    ou zw=100
+    (26, 32, 1, 40,  1.00, 2.0),   # ALUT/CCNS    predict
+    ( 1, 29, 1, 15,  0.40, 2.0),   # AENO/GARI    predict
+    (38, 19, 1, 20,  0.50, 2.0),   # HRND/SPLZ    predict
+    (21, 11, 0, 40,  0.60, 2.0),   # MMBT/NPCK    baseline
+    (47,  3, 2, 80,  1.00, 1.5),   # FCSG/SRNA    ou zw=80
+    (12, 40, 2, 40,  1.00, 3.0),   # MSDP/ULXY    ou zw=40
+    (42, 15, 2, 100, 1.00, 3.0),   # BENI/HRET    ou zw=100
 ]
 
-PAIR_AGGR = 2.0
-MIN_HISTORY = max(int(zw) for _,_,zw,_,_,_ in PAIRS) + 10
+REBAL_BAND  = 0.05
+MIN_HISTORY = max(int(zw) for _,_,_,zw,_,_ in PAIRS) + 10
 
 _pos    = np.zeros(N_INST, dtype=int)
 _last_n = 0
@@ -74,30 +66,71 @@ def getMyPosition(prcSoFar):
         return _pos.copy()
 
     log_p = np.log(prc)
+    rets_last = np.diff(log_p[:, -2:], axis=1)[:, 0] if n_days > 1 else np.zeros(n_inst)
 
     target_dollars = np.zeros(N_INST)
 
-    for i, j, zw, band, fi, fj in PAIRS:
-        if max(i, j) >= n_inst or n_days < zw + 5:
+    for i, j, method, zw, band, aggr in PAIRS:
+        if max(i, j) >= n_inst or n_days < zw + 10:
             continue
+
         ratio_win = log_p[i, -zw:] - log_p[j, -zw:]
-        s_mean = ratio_win[:-1].mean()
-        s_sd   = ratio_win[:-1].std()
-        if s_sd < 1e-12:
+        ratio_now = ratio_win[-1]
+
+        if method == 0:
+            # BASELINE: z-score
+            sm, ss = ratio_win[:-1].mean(), ratio_win[:-1].std()
+            if ss < 1e-12: continue
+            z = (ratio_now - sm) / ss
+            if abs(z) <= band: continue
+            f = np.tanh(aggr * z)
+
+        elif method == 1:
+            # PREDICT: z-score with acceleration dampening + vol scaling
+            sm, ss = ratio_win[:-1].mean(), ratio_win[:-1].std()
+            if ss < 1e-12: continue
+            z = (ratio_now - sm) / ss
+            # acceleration: compare z to z of previous day
+            if n_days > zw + 6:
+                ratio_prev = log_p[i, -zw-1:-1] - log_p[j, -zw-1:-1]
+                smp, ssp = ratio_prev[:-1].mean(), ratio_prev[:-1].std()
+                z_prev = (ratio_prev[-1] - smp) / max(ssp, 1e-12)
+                accel = z - z_prev
+            else:
+                accel = 0.
+            # vol scaling
+            daily_moves = np.abs(np.diff(ratio_win))
+            vol_scale = daily_moves.mean() / max(daily_moves.std(), 1e-12)
+            sig = z * (1 - 0.3 * np.sign(z) * np.sign(accel)) * np.clip(vol_scale, 0.5, 2.0)
+            if abs(sig) <= band: continue
+            f = np.tanh(aggr * sig)
+
+        else:
+            # OU MODEL: AR(1) fit gives optimal reversion signal
+            s = ratio_win
+            b = np.cov(s[1:], s[:-1])[0, 1] / max(np.var(s[:-1]), 1e-12)
+            b = np.clip(b, 0.01, 0.99)
+            mu_ou = s.mean()
+            sigma_ou = s.std() * np.sqrt(1 - b**2)
+            if sigma_ou < 1e-8: continue
+            z = (mu_ou - ratio_now) / sigma_ou
+            if abs(z) <= band: continue
+            f = np.tanh(aggr * z)
+            # OU: f>0 means ratio below mean, go long i / short j
+            target_dollars[i] += f * CAPS[i]
+            target_dollars[j] -= f * CAPS[j]
             continue
-        z = (ratio_win[-1] - s_mean) / s_sd
-        if abs(z) <= band:
-            continue
-        f = np.tanh(PAIR_AGGR * z)
-        target_dollars[i] -= f * CAPS[i] * fi
-        target_dollars[j] += f * CAPS[j] * fj
+
+        # Baseline and predict: f>0 means ratio above mean, short i / long j
+        target_dollars[i] -= f * CAPS[i]
+        target_dollars[j] += f * CAPS[j]
 
     target_dollars = np.clip(target_dollars, -CAPS, CAPS)
     target_sh = np.round(target_dollars / p_today).astype(int)
     target_sh = np.clip(target_sh, -max_sh, max_sh)
 
     drift   = np.abs(target_sh - _pos) * p_today
-    trade   = drift > 0.05 * CAPS
+    trade   = drift > REBAL_BAND * CAPS
     new_pos = _pos.copy()
     new_pos[trade] = target_sh[trade]
     new_pos = np.clip(new_pos, -max_sh, max_sh)
