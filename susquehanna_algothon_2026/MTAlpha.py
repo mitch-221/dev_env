@@ -12,7 +12,6 @@ Note: cap fractions — used asset gets half ($5k), free asset gets full ($10k).
 The combined exposure stays within caps through the clip in getMyPosition.
 
 eval.py: set numTestDays = 250 to score days 751-1000.
-Rename to <yourteamname>.py to submit.
 """
 
 import numpy as np
