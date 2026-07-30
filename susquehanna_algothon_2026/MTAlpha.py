@@ -1,27 +1,10 @@
 """
 MTAlpha v10 — 33 pairs + 20 pure-stranded triplets.
-Official score: 816 on days 1-1000, 707 on days 751-1000.
 
 ARCHITECTURE:
   Two completely independent layers:
-  
-  LAYER 1 — 33 cointegrated PAIRS across 39 primary assets:
-    ERP-based allocation: kappa * |z| * sigma per asset per day
-    ALGO ($100k): proportional across all active ALGO pairs
-    Others: winner-takes-all per asset by ERP
-    Beta-scaled sizing: secondary leg = primary * |beta|
-  
-  LAYER 2 — 20 cointegrated TRIPLETS across 12 stranded assets:
-    Stranded = ['SRNA','ELLT','AMRP','OTCS','CUBO','SPLZ','MMBT',
-                'AGVF','GARI','IHOZ','FARS','MDGI']
-    Zero capital conflict with Layer 1 — all 12 assets are unused by pairs
-    ERP-sorted; each triplet simply adds to target when signal fires
-    Sizing: anchor gets eff_cap = min(cap_i, cap_j/|b1|, cap_k/|b2|)
-  
-  Total capital deployed: ~$480k of $600k (80%) when fully active
-  SR=9.37, mu=$826/day, fully incremental state, zero warmup on day 1001
-
-PRIOR_STATE bakes in 1000 days of history for both layers.
+  LAYER 1 — 33 cointegrated PAIRS across 39 primary assets
+  LAYER 2 — 20 cointegrated TRIPLETS across 12 stranded assets
 """
 import numpy as np
 
