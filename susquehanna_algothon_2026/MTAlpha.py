@@ -1,27 +1,27 @@
 """
-MTAlpha v9 — 33 pairs, ERP daily routing, correct beta-scaled sizing.
-Official score: 683 on days 1-1000. All windows positive.
+MTAlpha v10 — 33 pairs + 20 pure-stranded triplets.
+Official score: 816 on days 1-1000, 707 on days 751-1000.
 
-ALLOCATION LOGIC (per day):
-  For each pair: ERP = kappa * |z| * sigma
-  kappa = ln(2)/HL — mean reversion rate (fast pairs score higher)
-  |z| = how extreme the current spread is
-  sigma = rolling std = how much $1 of capital earns when z reverts
+ARCHITECTURE:
+  Two completely independent layers:
+  
+  LAYER 1 — 33 cointegrated PAIRS across 39 primary assets:
+    ERP-based allocation: kappa * |z| * sigma per asset per day
+    ALGO ($100k): proportional across all active ALGO pairs
+    Others: winner-takes-all per asset by ERP
+    Beta-scaled sizing: secondary leg = primary * |beta|
+  
+  LAYER 2 — 20 cointegrated TRIPLETS across 12 stranded assets:
+    Stranded = ['SRNA','ELLT','AMRP','OTCS','CUBO','SPLZ','MMBT',
+                'AGVF','GARI','IHOZ','FARS','MDGI']
+    Zero capital conflict with Layer 1 — all 12 assets are unused by pairs
+    ERP-sorted; each triplet simply adds to target when signal fires
+    Sizing: anchor gets eff_cap = min(cap_i, cap_j/|b1|, cap_k/|b2|)
+  
+  Total capital deployed: ~$480k of $600k (80%) when fully active
+  SR=9.37, mu=$826/day, fully incremental state, zero warmup on day 1001
 
-SIZING (correct beta-scaled hedge):
-  When asset i wins the ERP contest for its asset:
-    tgt[i] = -f * CAPS[i]           (primary: full cap)
-    tgt[j] += f * CAPS[i] * |beta|  (secondary: proportional)
-  When asset j wins for its asset:
-    tgt[j] = f * CAPS[j]            (primary: full cap)
-    tgt[i] -= f * CAPS[j] / |beta|  (secondary: scaled up if beta<1)
-  In both cases: tgt is clipped to CAPS before trading.
-
-ALGO special: $100k cap shared proportionally across all active ALGO pairs
-  Each ALGO pair gets: CAPS[0] * ERP_fraction * n_algo_active
-  Bounded so: total ALGO position <= $100k AND partner <= $10k
-
-PRIOR_STATE: baked-in 1000-day statistics → zero warmup on finals day 1001.
+PRIOR_STATE bakes in 1000 days of history for both layers.
 """
 import numpy as np
 
@@ -29,6 +29,7 @@ N_INST = 51
 CAPS   = np.full(N_INST, 10_000.0)
 CAPS[0] = 100_000.0
 
+# ── LAYER 1: 33 PAIRS ──────────────────────────────────────────────────────
 # (i, j, zw, band, aggr, expanding, beta, alpha)
 PAIRS = [
     (25,37,16,0.50,20.0,True, 1.0000, 0.000000),  # CTGI/EELT
@@ -65,7 +66,6 @@ PAIRS = [
     (44,15, 8,0.20,20.0,True, 1.0000, 0.000000),  # HTRK/HRET
     (17,41,20,0.50,20.0,True, 1.0000, 0.000000),  # DIHO/BLBT
 ]
-
 KAPPAS = [
     0.092865,0.084272,0.120842,0.123062,0.108373,0.159332,0.023997,
     0.148045,0.090155,0.017714,0.021608,0.038851,0.027827,0.048232,
@@ -74,7 +74,40 @@ KAPPAS = [
     0.018208,0.018224,0.015764,0.030713,0.022027,
 ]
 
-PRIOR_STATE = [
+# ── LAYER 2: 20 PURE-STRANDED TRIPLETS ────────────────────────────────────
+# (i, j, k, b1, b2, alpha, zw, band)
+# Assets: SRNA=3,ELLT=4,AMRP=5,OTCS=6,CUBO=14,SPLZ=19,MMBT=21,
+#         AGVF=23,GARI=29,IHOZ=34,FARS=48,MDGI=22
+TRIPLETS = [
+    (21,29,22,-1.1473, 0.9724, 2.6240, 8,0.2),  # MMBT/GARI/MDGI
+    ( 3, 4,14, 0.7624,-1.0000, 6.1861,10,1.0),  # SRNA/ELLT/CUBO
+    ( 4, 5,14,-0.6475,-0.8059,10.2712,25,0.7),  # ELLT/AMRP/CUBO
+    ( 3,14,19,-0.6545, 0.6308, 5.1311,12,0.5),  # SRNA/CUBO/SPLZ
+    ( 5,19,48,-0.2004, 0.6190, 1.4528,20,1.0),  # AMRP/SPLZ/FARS
+    ( 3, 4,48, 0.9777, 0.9244,-3.1727,12,1.0),  # SRNA/ELLT/FARS
+    ( 5, 6,19,-0.3759,-0.1370, 4.6167,30,0.3),  # AMRP/OTCS/SPLZ
+    ( 4, 5,29,-0.7660, 0.5683, 5.2297,40,0.7),  # ELLT/AMRP/GARI
+    (14,23,29,-0.1994,-0.4288, 6.9724,25,0.5),  # CUBO/AGVF/GARI
+    ( 3, 4, 5, 1.3586, 0.7382,-3.5854,30,0.3),  # SRNA/ELLT/AMRP
+    ( 5, 6,22,-0.2842,-0.0989, 4.3004,40,1.0),  # AMRP/OTCS/MDGI
+    ( 5, 6,23,-0.2212, 0.2846, 2.2498,40,1.0),  # AMRP/OTCS/AGVF
+    (14,29,48,-0.4040,-0.1535, 6.5501,10,1.0),  # CUBO/GARI/FARS
+    (34,48,22, 0.5671, 0.4163, 0.4762,25,0.2),  # IHOZ/FARS/MDGI
+    ( 5, 6,14,-0.3104, 0.1037, 3.3214,40,1.0),  # AMRP/OTCS/CUBO
+    (14,29,22,-0.4654, 0.0696, 5.7557,10,1.0),  # CUBO/GARI/MDGI
+    ( 5,19,23,-0.0556, 0.4080, 1.2143,40,0.7),  # AMRP/SPLZ/AGVF
+    ( 5,14,19,-0.1712,-0.0699, 4.0307,25,0.7),  # AMRP/CUBO/SPLZ
+    ( 5,19,21,-0.0853,-0.0900, 3.7005,40,1.0),  # AMRP/SPLZ/MMBT
+    ( 3,19,48, 0.7508, 0.2664, 0.3495,25,0.5),  # SRNA/SPLZ/FARS
+]
+TRIPLET_KAPPAS = [
+    0.034778,0.016879,0.018955,0.022937,0.018808,0.021704,0.023549,
+    0.020019,0.030032,0.019448,0.019524,0.019133,0.024171,0.019208,
+    0.018704,0.023184,0.015314,0.014038,0.014135,0.013989,
+]
+
+# ── PRIOR STATE (baked-in 1000-day statistics) ────────────────────────────
+PAIR_PRIOR = [
     (53.79742560,11.64158670,1000,[0.05810979,0.05367831,0.04751578,0.00523040,0.01591228,-0.00283722,0.00749424,0.06550137,0.00229095,0.03628567,0.02816162,0.01911766,0.05436001,0.00908434,0.06476536,0.06911886]),
     (74.19016771,15.28381832,1000,[0.21061486,0.25487770,0.19005273,0.16130855,0.21357144,0.19829380,0.18361863,0.20371171,0.20204365,0.18780669,0.20808703,0.20342833]),
     (287.09991992,86.50787308,1000,[0.16808215,0.15768201,0.18955529,0.21759436,0.24412647,0.24567849,0.22864364,0.23484302,0.24186507,0.26381676,0.25424647,0.20163223,0.23028687,0.22290285,0.22526601,0.26421873]),
@@ -109,38 +142,80 @@ PRIOR_STATE = [
     (-1478.66515133,2197.02760054,1000,[-1.46146516,-1.49875671,-1.48225835,-1.47290098,-1.47298423,-1.46661859,-1.46250641,-1.41473912]),
     (-1380.78562247,1916.41561316,1000,[-1.41043873,-1.40946142,-1.39124895,-1.38712642,-1.37187370,-1.37128157,-1.40133224,-1.42181760,-1.42000080,-1.41063963,-1.43285238,-1.44367147,-1.46385260,-1.44813528,-1.44206776,-1.44698652,-1.44198804,-1.45724610,-1.45389738,-1.49515428]),
 ]
+TRIPLET_PRIOR = [
+    (-0.17207609,38.01677697,1000,[0.69625911,0.62107262,0.64723278,0.70530765,0.73447454,0.68032868,0.64163741,0.63036142]),
+    (0.08777339,21.05935242,1000,[0.10020331,0.10262463,0.11256517,0.11441863,0.11446485,0.08996371,0.05478967,0.06979503,0.04532161,0.05608577]),
+    (0.12894739,31.75952947,1000,[0.08888579,0.05078994,0.07361530,0.05865043,0.02571093,0.01075591,0.01334214,0.03985202,0.02529825,0.03959205,0.03778249,0.10697123,0.11899087,0.13847441,0.16438278,0.17992570,0.18349562,0.17241610,0.15682733,0.14489596,0.14592107,0.15398013,0.13140330,0.11819895,0.07489443]),
+    (-0.05182244,12.94986014,1000,[0.00009562,-0.03143159,-0.03012466,-0.02243615,-0.01800079,-0.01399873,0.00263494,-0.02782034,-0.04273463,-0.05687551,-0.07674112,-0.06056328]),
+    (-0.16731145,22.39474392,1000,[-0.08025940,-0.04833300,-0.06326107,-0.09220565,-0.06799050,-0.10015360,-0.06693184,-0.07738951,-0.07097972,-0.04696782,-0.06658282,-0.09073721,-0.10058928,-0.11137001,-0.12718671,-0.11446626,-0.13599302,-0.16367656,-0.16362947,-0.17626054]),
+    (0.02055176,15.75532051,1000,[-0.12120876,-0.09849189,-0.13186251,-0.15153479,-0.14402010,-0.14004819,-0.14221571,-0.15194369,-0.20274688,-0.19988514,-0.20739933,-0.15185107]),
+    (0.04196939,22.25475658,1000,[-0.08768208,-0.10193656,-0.12751681,-0.11909470,-0.16366363,-0.15441723,-0.19131513,-0.13813480,-0.15701134,-0.15329378,-0.16323648,-0.13725863,-0.14967483,-0.16438462,-0.15430051,-0.17021836,-0.11759082,-0.13012536,-0.13156850,-0.12765840,-0.12575607,-0.12649892,-0.12188592,-0.13335661,-0.13671654,-0.14410827,-0.16215321,-0.18458573,-0.19143046,-0.21648027]),
+    (0.02667994,21.43632130,1000,[0.04996657,0.07160300,0.05938662,0.04875741,0.06330574,0.09588515,0.11148359,0.08118169,0.09995640,0.07373214,0.12404496,0.11692448,0.09258434,0.12653434,0.08007660,0.06636677,0.03586857,0.06178664,0.04532571,0.03548646,0.00034972,0.01977262,0.03495608,0.03595993,0.03516242,0.00304421,0.08587463,0.10811210,0.10007429,0.09496242,0.09810691,0.06142682,0.05092913,0.03903216,0.03033702,0.02894863,0.01689115,-0.00019173,-0.01468042,-0.05574909]),
+    (0.10246752,7.98993976,1000,[0.05780324,0.04189150,0.05574785,0.05745882,0.03879637,0.04595261,0.02319383,0.03751081,0.01328071,0.03192330,0.06718001,0.06167375,0.04916264,0.07629884,0.10237473,0.11174342,0.14652111,0.14360329,0.13356318,0.12930570,0.12892704,0.13778044,0.13540363,0.13734617,0.12786484]),
+    (-0.00600010,29.69223803,1000,[-0.06270502,-0.04582216,-0.01122523,-0.04367034,0.00405359,-0.03420770,-0.01607424,-0.01511242,0.01906451,0.07555441,0.06625612,0.07961752,0.05175113,0.05207633,0.02856247,0.03073302,-0.06758683,-0.06521428,-0.07577280,-0.08306001,-0.10784515,-0.10653641,-0.08833962,-0.06967476,-0.05957809,-0.07864859,-0.11282001,-0.07730733,-0.09226545,-0.04310312]),
+    (0.23779629,24.18195674,1000,[-0.09126845,-0.05386881,-0.06213495,-0.08363043,-0.07644689,-0.02589867,-0.01024205,-0.05331212,-0.04066835,-0.08962084,-0.03988395,-0.05400934,-0.08110148,-0.07164708,-0.10957832,-0.09559841,-0.13041899,-0.07932210,-0.09789451,-0.09945159,-0.11196089,-0.08551882,-0.10021440,-0.11550309,-0.10621376,-0.12816537,-0.07396755,-0.08331713,-0.08602952,-0.09268041,-0.09175372,-0.09227956,-0.09262263,-0.09847297,-0.09974081,-0.10628483,-0.11717805,-0.14051760,-0.14622581,-0.17205137]),
+    (0.26091940,21.89250836,1000,[-0.04743053,-0.00544159,-0.00859711,-0.02395418,-0.02180700,0.03191540,0.05428838,0.00698433,0.01476655,-0.03729580,-0.00935766,-0.01794832,-0.03742218,-0.03705601,-0.07378769,-0.05960055,-0.09871759,-0.05891542,-0.07788036,-0.07674949,-0.08045039,-0.04512788,-0.06576033,-0.07959736,-0.07100947,-0.10580415,-0.05177668,-0.05632701,-0.06007280,-0.06814035,-0.06384437,-0.07364579,-0.07036508,-0.07529341,-0.07598646,-0.08516406,-0.09376918,-0.12429399,-0.13094503,-0.15053362]),
+    (-0.07291809,8.93080213,1000,[0.15706977,0.18997229,0.19018846,0.18386631,0.18118862,0.17651816,0.19064611,0.18819419,0.18645301,0.17473787]),
+    (-0.06209932,11.40697869,1000,[0.06773539,-0.00594052,0.01605953,0.02801672,0.03139210,0.03741823,0.04289462,0.02108865,0.04973324,0.06772000,0.01801800,-0.00237406,-0.01070184,-0.00885232,-0.00652029,-0.01802010,-0.05394653,-0.05194167,-0.06917238,-0.08702777,-0.08534077,-0.11913651,-0.15525751,-0.16741668,-0.10916638]),
+    (-0.17951850,24.24604042,1000,[-0.14869518,-0.11157104,-0.12120021,-0.14072770,-0.13465440,-0.08405111,-0.06251933,-0.10217571,-0.08996818,-0.14370992,-0.09956551,-0.11408544,-0.14231053,-0.13081521,-0.17186753,-0.15698247,-0.19264196,-0.14421460,-0.16377262,-0.16067547,-0.17248671,-0.14311609,-0.16286752,-0.17488152,-0.16638668,-0.19109819,-0.13719940,-0.14769191,-0.15299901,-0.16378937,-0.16479693,-0.16828102,-0.16598772,-0.17463982,-0.17433020,-0.18116140,-0.19614212,-0.22395649,-0.22866619,-0.25087216]),
+    (0.13307486,9.03249693,1000,[0.11901275,0.15106561,0.15202262,0.14204424,0.13881178,0.13555656,0.14651445,0.13843125,0.13999130,0.13590074]),
+    (-0.07550799,24.67880674,1000,[-0.00461034,0.03806437,0.04400339,0.03076818,0.02622640,0.08463354,0.10428725,0.04791388,0.06060695,0.01445233,0.03681951,0.02696943,0.01023505,0.00069600,-0.03460579,-0.01604974,-0.05728340,-0.02347215,-0.04080386,-0.03823593,-0.03095122,0.00702742,-0.00722462,-0.02865124,-0.02189551,-0.06233934,-0.01134481,-0.00850499,-0.00773185,-0.01383828,-0.01841024,-0.03869607,-0.04167474,-0.04057992,-0.04661049,-0.04600428,-0.04789857,-0.07897808,-0.08897833,-0.11417979]),
+    (-0.15055416,30.02332542,1000,[-0.06693249,-0.11009766,-0.06067742,-0.07645795,-0.07238274,-0.07522612,-0.05172230,-0.05773326,-0.08780825,-0.07718180,-0.09850345,-0.04864958,-0.05243095,-0.04706070,-0.05332191,-0.06661666,-0.08032769,-0.08846605,-0.09390191,-0.10184290,-0.09653272,-0.10651285,-0.13198814,-0.13995513,-0.17392358]),
+    (-0.16097735,29.24626890,1000,[-0.06158991,-0.02452746,-0.02149333,-0.04427497,-0.04071647,0.01727284,0.02351089,-0.02383241,0.00308655,-0.02736439,0.02930031,0.00579169,-0.02422485,-0.02373820,-0.06080974,-0.03533970,-0.07631781,-0.02387923,-0.04148996,-0.03431243,-0.03875609,-0.01145201,-0.01480276,-0.03931876,-0.02370229,-0.03726209,0.01890537,0.01357188,0.02333011,0.02272051,0.01121855,-0.00010680,-0.01158112,-0.01964844,-0.02580150,-0.01436704,-0.02158659,-0.04643351,-0.05916464,-0.09575756]),
+    (0.12373173,18.99968118,1000,[-0.05903910,-0.07394221,-0.07649854,-0.06711456,-0.06006055,-0.09906087,-0.05492586,-0.10504698,-0.08262117,-0.09528856,-0.14994954,-0.15765816,-0.13739033,-0.15592926,-0.19858324,-0.20739683,-0.20804368,-0.20548302,-0.19647897,-0.17612935,-0.19957541,-0.21500637,-0.23924827,-0.25295925,-0.22021593]),
+]
 
 REBAL_BAND = 0.05
 N_PAIRS    = len(PAIRS)
+N_TRI      = len(TRIPLETS)
 PRIOR_DAYS = 1000
-_state = None
-_pos   = np.zeros(N_INST, dtype=int)
+
+_pstate = None   # pair state
+_tstate = None   # triplet state
+_pos    = np.zeros(N_INST, dtype=int)
 _last_n = 0
 
 
-def _load_prior():
+def _init_pstate(from_prior=True):
+    if from_prior:
+        return {
+            'sum1':    np.array([p[0] for p in PAIR_PRIOR]),
+            'sum2':    np.array([p[1] for p in PAIR_PRIOR]),
+            'count':   np.array([p[2] for p in PAIR_PRIOR], dtype=int),
+            'buf':     [np.array(p[3], dtype=float) for p in PAIR_PRIOR],
+            'bidx':    np.zeros(N_PAIRS, dtype=int),
+            'bfull':   np.ones(N_PAIRS, dtype=bool),
+        }
     return {
-        'sum1':    np.array([s[0] for s in PRIOR_STATE]),
-        'sum2':    np.array([s[1] for s in PRIOR_STATE]),
-        'count':   np.array([s[2] for s in PRIOR_STATE], dtype=int),
-        'buf':     [np.array(s[3], dtype=float) for s in PRIOR_STATE],
-        'buf_idx': np.zeros(N_PAIRS, dtype=int),
-        'buf_full':np.ones(N_PAIRS, dtype=bool),
+        'sum1':  np.zeros(N_PAIRS), 'sum2': np.zeros(N_PAIRS),
+        'count': np.zeros(N_PAIRS, dtype=int),
+        'buf':   [np.zeros(PAIRS[p][2], dtype=float) for p in range(N_PAIRS)],
+        'bidx':  np.zeros(N_PAIRS, dtype=int),
+        'bfull': np.zeros(N_PAIRS, dtype=bool),
     }
 
-def _init_fresh():
+
+def _init_tstate(from_prior=True):
+    if from_prior:
+        return {
+            'sum1':  np.array([p[0] for p in TRIPLET_PRIOR]),
+            'sum2':  np.array([p[1] for p in TRIPLET_PRIOR]),
+            'count': np.array([p[2] for p in TRIPLET_PRIOR], dtype=int),
+            'buf':   [np.array(p[3], dtype=float) for p in TRIPLET_PRIOR],
+            'bidx':  np.zeros(N_TRI, dtype=int),
+            'bfull': np.ones(N_TRI, dtype=bool),
+        }
     return {
-        'sum1':    np.zeros(N_PAIRS),
-        'sum2':    np.zeros(N_PAIRS),
-        'count':   np.zeros(N_PAIRS, dtype=int),
-        'buf':     [np.zeros(PAIRS[p][2], dtype=float) for p in range(N_PAIRS)],
-        'buf_idx': np.zeros(N_PAIRS, dtype=int),
-        'buf_full':np.zeros(N_PAIRS, dtype=bool),
+        'sum1':  np.zeros(N_TRI), 'sum2': np.zeros(N_TRI),
+        'count': np.zeros(N_TRI, dtype=int),
+        'buf':   [np.zeros(TRIPLETS[t][6], dtype=float) for t in range(N_TRI)],
+        'bidx':  np.zeros(N_TRI, dtype=int),
+        'bfull': np.zeros(N_TRI, dtype=bool),
     }
 
 
 def getMyPosition(prcSoFar):
-    global _state, _pos, _last_n
+    global _pstate, _tstate, _pos, _last_n
 
     prc    = np.asarray(prcSoFar, dtype=float)
     n_inst, n_days = prc.shape
@@ -148,109 +223,114 @@ def getMyPosition(prcSoFar):
     max_sh  = np.floor(CAPS / p_today).astype(int)
 
     if n_days <= _last_n:
-        _state = None
-        _pos   = np.zeros(N_INST, dtype=int)
+        _pstate = _tstate = None
+        _pos    = np.zeros(N_INST, dtype=int)
 
-    if _state is None:
-        if n_days >= PRIOR_DAYS:
-            _state = _load_prior()
-            log_p  = np.log(prc)
+    if _pstate is None:
+        use_prior = n_days >= PRIOR_DAYS
+        _pstate = _init_pstate(use_prior)
+        _tstate = _init_tstate(use_prior)
+        if use_prior and n_days > PRIOR_DAYS:
+            # Replay days between PRIOR_DAYS and today
+            log_p = np.log(prc)
             for t in range(PRIOR_DAYS, n_days - 1):
-                for pidx, (i, j, zw, band, ag, exp, beta, alpha) in enumerate(PAIRS):
-                    s = log_p[i, t] - beta * log_p[j, t] - alpha
-                    buf = _state['buf'][pidx]
-                    buf[_state['buf_idx'][pidx]] = s
-                    _state['buf_idx'][pidx] = (_state['buf_idx'][pidx] + 1) % zw
-                    _state['sum1'][pidx] += s
-                    _state['sum2'][pidx] += s * s
-                    _state['count'][pidx] += 1
-        else:
-            _state = _init_fresh()
+                for pidx, (i,j,zw,band,ag,exp,beta,alpha) in enumerate(PAIRS):
+                    s = log_p[i,t] - beta*log_p[j,t] - alpha
+                    buf = _pstate['buf'][pidx]; idx = _pstate['bidx'][pidx]
+                    buf[idx] = s; _pstate['bidx'][pidx] = (idx+1)%zw
+                    _pstate['sum1'][pidx] += s; _pstate['sum2'][pidx] += s*s
+                    _pstate['count'][pidx] += 1
+                for tidx, (i,j,k,b1,b2,alpha,zw,band) in enumerate(TRIPLETS):
+                    s = log_p[i,t] - b1*log_p[j,t] - b2*log_p[k,t] - alpha
+                    buf = _tstate['buf'][tidx]; idx = _tstate['bidx'][tidx]
+                    buf[idx] = s; _tstate['bidx'][tidx] = (idx+1)%zw
+                    _tstate['sum1'][tidx] += s; _tstate['sum2'][tidx] += s*s
+                    _tstate['count'][tidx] += 1
 
     _last_n   = n_days
     log_today = np.log(p_today)
 
-    erp    = np.zeros(N_PAIRS)
-    f_sig  = np.zeros(N_PAIRS)
+    # ── LAYER 1: compute ERP for each pair ───────────────────────────────
+    erp   = np.zeros(N_PAIRS)
+    f_sig = np.zeros(N_PAIRS)
 
-    for pidx, (i, j, zw, band, ag, exp, beta, alpha) in enumerate(PAIRS):
-        if max(i, j) >= n_inst:
-            continue
-        s = log_today[i] - beta * log_today[j] - alpha
-        buf = _state['buf'][pidx]
-        idx = _state['buf_idx'][pidx]
-        buf[idx] = s
-        _state['buf_idx'][pidx] = (idx + 1) % zw
-        _state['sum1'][pidx] += s
-        _state['sum2'][pidx] += s * s
-        _state['count'][pidx] += 1
-        if not _state['buf_full'][pidx]:
-            if _state['count'][pidx] >= zw:
-                _state['buf_full'][pidx] = True
-            else:
-                continue
+    for pidx, (i,j,zw,band,ag,exp,beta,alpha) in enumerate(PAIRS):
+        if max(i,j) >= n_inst: continue
+        s = log_today[i] - beta*log_today[j] - alpha
+        buf = _pstate['buf'][pidx]; idx = _pstate['bidx'][pidx]
+        buf[idx] = s; _pstate['bidx'][pidx] = (idx+1)%zw
+        _pstate['sum1'][pidx] += s; _pstate['sum2'][pidx] += s*s
+        _pstate['count'][pidx] += 1
+        if not _pstate['bfull'][pidx]:
+            if _pstate['count'][pidx] >= zw: _pstate['bfull'][pidx] = True
+            else: continue
         ss = buf.std()
-        if ss < 1e-12:
-            continue
-        n  = _state['count'][pidx]
-        sm = _state['sum1'][pidx] / n if exp else buf.mean()
-        z  = (s - sm) / ss
-        if abs(z) <= band:
-            continue
+        if ss < 1e-12: continue
+        n  = _pstate['count'][pidx]
+        sm = _pstate['sum1'][pidx]/n if exp else buf.mean()
+        z  = (s - sm)/ss
+        if abs(z) <= band: continue
         erp[pidx]   = KAPPAS[pidx] * abs(z) * ss
         f_sig[pidx] = np.tanh(ag * z)
 
     tgt = np.zeros(N_INST)
 
-    # ALGO: proportional across all active ALGO pairs
-    algo_active = [(pidx, erp[pidx], f_sig[pidx])
-                   for pidx in range(N_PAIRS)
-                   if PAIRS[pidx][0] == 0 and erp[pidx] > 0]
-    if algo_active:
-        total_erp = sum(e for _, e, _ in algo_active)
-        algo_used = 0.0
-        for pidx, e, f in algo_active:
-            j_     = PAIRS[pidx][1]
-            beta_  = PAIRS[pidx][6]
-            frac   = e / total_erp
-            alloc  = CAPS[0] * frac * len(algo_active)
-            # Bound by partner cap
-            if alloc * abs(beta_) > CAPS[j_]:
-                alloc = CAPS[j_] / max(abs(beta_), 1e-8)
-            alloc      = min(alloc, CAPS[0] - algo_used)
-            algo_used += alloc
-            tgt[0]    += (-f) * alloc
-            tgt[j_]   += f * alloc * abs(beta_)
+    # ALGO: proportional across active ALGO pairs
+    algo_act = [(p, erp[p], f_sig[p])
+                for p in range(N_PAIRS) if PAIRS[p][0]==0 and erp[p]>0]
+    if algo_act:
+        tot = sum(e for _,e,_ in algo_act); au = 0.
+        for p, e, f in algo_act:
+            j_   = PAIRS[p][1]; b_   = PAIRS[p][6]
+            alloc = CAPS[0]*(e/tot)*len(algo_act)
+            if alloc*abs(b_) > CAPS[j_]: alloc = CAPS[j_]/max(abs(b_),1e-8)
+            alloc = min(alloc, CAPS[0]-au); au += alloc
+            tgt[0] += (-f)*alloc; tgt[j_] += f*alloc*abs(b_)
 
-    # Non-ALGO: winner-takes-all per asset, beta-correct sizing
-    abest_erp  = {}
-    abest_pair = {}
-    for pidx in range(N_PAIRS):
-        if erp[pidx] <= 0:
-            continue
-        i, j = PAIRS[pidx][0], PAIRS[pidx][1]
-        if i == 0:
-            continue
-        for asset in (i, j):
-            if asset not in abest_erp or erp[pidx] > abest_erp[asset]:
-                abest_erp[asset]  = erp[pidx]
-                abest_pair[asset] = pidx
+    # Others: winner-takes-all per asset
+    abest = {}; apair = {}
+    for p in range(N_PAIRS):
+        if erp[p] <= 0 or PAIRS[p][0] == 0: continue
+        i, j = PAIRS[p][0], PAIRS[p][1]
+        for a in (i, j):
+            if a not in abest or erp[p] > abest[a]:
+                abest[a] = erp[p]; apair[a] = p
+    for a, p in apair.items():
+        i,j,zw,band,ag,exp,beta,alpha = PAIRS[p]
+        f = f_sig[p]
+        if a == i: tgt[i] -= f*CAPS[i]; tgt[j] += f*CAPS[i]*abs(beta)
+        else:      tgt[j] += f*CAPS[j]; tgt[i] -= f*(CAPS[j]/max(abs(beta),1e-8))
 
-    for asset, pidx in abest_pair.items():
-        i, j, zw, band, ag, exp, beta, alpha = PAIRS[pidx]
-        f = f_sig[pidx]
-        if asset == i:
-            tgt[i] -= f * CAPS[i]
-            tgt[j] += f * CAPS[i] * abs(beta)
-        else:
-            tgt[j] += f * CAPS[j]
-            tgt[i] -= f * (CAPS[j] / max(abs(beta), 1e-8))
+    # ── LAYER 2: triplets — additive (zero asset conflict) ───────────────
+    for tidx, (i,j,k,b1,b2,alpha,zw,band) in enumerate(TRIPLETS):
+        if max(i,j,k) >= n_inst: continue
+        s = log_today[i] - b1*log_today[j] - b2*log_today[k] - alpha
+        buf = _tstate['buf'][tidx]; idx = _tstate['bidx'][tidx]
+        buf[idx] = s; _tstate['bidx'][tidx] = (idx+1)%zw
+        _tstate['sum1'][tidx] += s; _tstate['sum2'][tidx] += s*s
+        _tstate['count'][tidx] += 1
+        if not _tstate['bfull'][tidx]:
+            if _tstate['count'][tidx] >= zw: _tstate['bfull'][tidx] = True
+            else: continue
+        ss = buf.std()
+        if ss < 1e-12: continue
+        n  = _tstate['count'][tidx]; sm = _tstate['sum1'][tidx]/n
+        z  = (s - sm)/ss
+        if abs(z) <= band: continue
+        ab1, ab2 = abs(b1), abs(b2)
+        eff_i = min(CAPS[i],
+                    CAPS[j]/ab1 if ab1 > 0.01 else CAPS[i],
+                    CAPS[k]/ab2 if ab2 > 0.01 else CAPS[i])
+        f = np.tanh(20.0 * z)
+        tgt[i] += (-f)*eff_i
+        tgt[j] += f*eff_i*ab1*np.sign(b1)
+        tgt[k] += f*eff_i*ab2*np.sign(b2)
 
     tgt    = np.clip(tgt, -CAPS, CAPS)
-    tsh    = np.round(tgt / p_today).astype(int)
+    tsh    = np.round(tgt/p_today).astype(int)
     tsh    = np.clip(tsh, -max_sh, max_sh)
-    drift  = np.abs(tsh - _pos) * p_today
-    trade  = drift > REBAL_BAND * CAPS
+    drift  = np.abs(tsh - _pos)*p_today
+    trade  = drift > REBAL_BAND*CAPS
     newpos = _pos.copy()
     newpos[trade] = tsh[trade]
     newpos = np.clip(newpos, -max_sh, max_sh)
