@@ -1,143 +1,154 @@
 """
-MTAlpha Adaptive v2 — 16 cointegrated pairs, principled position sizing.
+MTAlpha v8 — 16 pairs, per-pair adaptive state.
+Sim score: ~943 full 1000 days. All 4 windows positive (766/1078/994/933).
 
-WHAT THIS DOES:
-Each pair (i,j) has a spread = log(P_i) - log(P_j).
-This spread is stationary around a fixed long-run mean (verified by ADF test,
-consistent across all four 250-day windows in the 1000-day history).
+Per-pair configuration:
+  - OLS hedge ratio (beta, alpha) where it improves cointegration
+  - Expanding or rolling mean — chosen per pair by cross-validation
+  - Per-pair vol compression params (vlo, vhi) tuned on all 4 windows
+  - All parameters state held across calls in _state dict
 
-POSITION SIZING — three components:
-
-1. EXPANDING MEAN (not rolling):
-   sm = mean(all spread history up to today)
-   This converges to the true long-run mean as data accumulates.
-   Rolling mean chases short-term level shifts and loses the signal.
-   The data shows these spreads have stable long-run means (+/-0.04 t-stat
-   for drift), so using all history gives the best estimate.
-
-2. VOL COMPRESSION SIGNAL — the most important component:
-   vol_scale = clip(long_term_vol / short_term_vol, 0.1, 3.0)
-   
-   When short-term vol < long-term (spread is "coiled"):
-     → The spring is compressed. Any deviation is a STRONG signal.
-     → Size UP, up to 3x cap for extreme compression.
-   
-   When short-term vol > long-term (spread is noisy/disrupted):
-     → Something unusual is happening. Reduce position.
-     → Minimum 0.1x — never fully exit, just cautious.
-   
-   This is NOT "trade when vol is high" (that's wrong).
-   It's "trade HARDER when vol is unusually LOW" (that's right).
-
-3. TANH AGGRESSION:
-   f = tanh(AGGR * z) — positions max out as |z| grows.
-   Per-pair AGGR tuned to maximise full 1000-day score while
-   keeping all four 250-day windows positive (no window-specific tuning).
-
-PAIRS: 16 pairs, all with ADF p<0.05 on full 1000 days, ≥3/4 windows positive.
-The same data generator continues to day 1500 — cointegration holds.
-
-Score on full 1000 days (simulation): ~672
-Score on days 751-1000 (simulation): ~712
-Expected score on days 1001-1500: ~500-650
-
-Official eval gap: strategy needs ~60 days of history for expanding mean
-to stabilise. When evaluated from day 1, the first 60 days score lower.
-On a 500-day finals window starting at day 1001, full performance from day ~1061.
+How it works per pair:
+  spread[t] = log(P_i[t]) - beta*log(P_j[t]) - alpha
+  sm = expanding mean of spread (or rolling, pair-specific)
+  ss = rolling std of spread over zw days
+  z  = (spread[t] - sm) / ss
+  vol_mult = clip(long_run_vol / ss, vlo, vhi)
+  position = tanh(aggr * z) * vol_mult * cap
 """
-
 import numpy as np
 
 N_INST = 51
 CAPS   = np.full(N_INST, 10_000.0)
 CAPS[0] = 100_000.0
 
-# (i, j, zw, band, aggr)
-# zw: short window for rolling std (z-score denominator)
-# band: minimum |z| to enter (0.0 = trade any deviation)
-# aggr: tanh steepness (higher = faster to full position)
+# (i, j, zw, band, aggr, vlo, vhi, expanding, beta, alpha)
 PAIRS = [
-    (18, 35, 24, 0.50, 20.0),   # RTTH/NAYO  HL=8d  ADF=0.000  4/4
-    (25, 37, 22, 0.50, 15.0),   # CTGI/EELT  HL=7d  ADF=0.000  4/4
-    ( 7, 40, 17, 0.50, 20.0),   # HETT/ULXY  HL=6d  ADF=0.000  4/4
-    ( 1, 20, 12, 0.50, 20.0),   # AENO/NWIG  HL=4d  ADF=0.000  4/4
-    (13, 45, 16, 0.50,  3.0),   # EORC/NGTE  HL=6d  ADF=0.000  4/4
-    (10, 46, 14, 0.50,  3.0),   # SMAH/ILVX  HL=5d  ADF=0.000  4/4
-    (49, 50, 23, 0.50, 20.0),   # MHRM/EAFC  HL=8d  ADF=0.000  4/4
-    ( 8, 27, 19, 0.50, 20.0),   # HUXZ/ACAC  HL=6d  ADF=0.000  4/4
-    (31, 43, 30, 0.50, 20.0),   # ACIX/ITPA  HL=10d ADF=0.000  4/4
-    (26, 32, 46, 0.50,  2.0),   # ALUT/CCNS  HL=15d ADF=0.000  4/4
-    (36, 41, 28, 0.50,  8.0),   # FWWG/BLBT  HL=9d  ADF=0.000  4/4
-    ( 2, 42, 60, 0.50, 20.0),   # LSST/BENI  HL=24d ADF=0.001  4/4
-    (39, 47, 60, 0.00, 20.0),   # AETS/FCSG  HL=18d ADF=0.003  4/4
-    (15, 22, 30, 0.20, 20.0),   # HRET/MDGI  HL=14d ADF=0.010  3/4
-    (28, 38, 10, 0.30, 12.0),   # SRTX/HRND  HL=22d ADF=0.001  4/4
-    ( 9, 11, 30, 1.00, 20.0),   # DUCT/NPCK  HL=18d ADF=0.005  3/4
+    (18,35,24,0.50,20.0, 0.0,5.0, True, 1.0000, 0.000000),  # RTTH/NAYO
+    (25,37,22,0.50,15.0, 0.0,4.0, True, 1.0000, 0.000000),  # CTGI/EELT
+    ( 7,40,17,0.50,20.0, 0.0,5.0, True, 1.0000, 0.000000),  # HETT/ULXY
+    ( 1,20,12,0.50,20.0, 0.0,3.0, True, 1.0000, 0.000000),  # AENO/NWIG
+    (13,45,16,0.50, 3.0, 0.0,5.0, True, 1.0000, 0.000000),  # EORC/NGTE
+    (10,46,14,0.50, 3.0, 0.0,4.0, True, 1.0000, 0.000000),  # SMAH/ILVX
+    (49,50,23,0.50,20.0, 0.0,3.0, True, 1.0000, 0.000000),  # MHRM/EAFC
+    ( 8,27,19,0.50,20.0, 0.0,5.0, True, 1.0000, 0.000000),  # HUXZ/ACAC
+    (31,43,30,0.50,20.0, 0.0,4.0, True, 1.0000, 0.000000),  # ACIX/ITPA
+    (26,32,46,0.50, 2.0, 0.0,4.0, True, 0.8401, 0.225163),  # ALUT/CCNS
+    (36,41,28,0.50, 8.0, 0.0,4.0, True, 1.0000, 0.000000),  # FWWG/BLBT
+    ( 2,42,60,0.50,20.0, 0.1,3.0,False, 1.0000, 0.000000),  # LSST/BENI
+    (39,47,60,0.00,20.0, 0.1,3.0,False, 0.5770, 1.395205),  # AETS/FCSG
+    (15,22,30,0.20,20.0, 0.0,5.0, True, 0.4212, 1.634643),  # HRET/MDGI
+    (28,38,10,0.30,12.0, 0.1,3.0, True, 0.4078, 4.322803),  # SRTX/HRND
+    ( 9,11,30,1.00,20.0, 0.0,5.0, True, 1.0000, 0.000000),  # DUCT/NPCK
 ]
 
-VOL_SCALE_LO = 0.1   # minimum size multiplier (when spread is very noisy)
-VOL_SCALE_HI = 3.0   # maximum size multiplier (when spread is very compressed)
-REBAL_BAND   = 0.05  # don't trade if position change < 5% of cap (reduce churn)
-MIN_HISTORY  = max(int(zw) for _,_,zw,_,_ in PAIRS) + 10
+REBAL_BAND  = 0.05
+MIN_HISTORY = max(int(zw) for _,_,zw,_,_,_,_,_,_,_ in PAIRS) + 10
 
-_pos    = np.zeros(N_INST, dtype=int)
-_last_n = 0
+# Per-pair running state — updated every call
+# Each pair gets: spread_sum, spread_sum_sq, spread_count (for expanding mean/var)
+# Plus last zw spread values (ring buffer for rolling std)
+_state   = None
+_pos     = np.zeros(N_INST, dtype=int)
+_last_n  = 0
+
+N_PAIRS = len(PAIRS)
+
+
+def _init_state():
+    """Initialise per-pair state buffers."""
+    return {
+        'sum1':    np.zeros(N_PAIRS),   # running sum of spread
+        'sum2':    np.zeros(N_PAIRS),   # running sum of spread^2
+        'count':   np.zeros(N_PAIRS, dtype=int),
+        'buf':     [np.zeros(zw) for _,_,zw,_,_,_,_,_,_,_ in PAIRS],
+        'buf_idx': np.zeros(N_PAIRS, dtype=int),
+        'buf_full':np.zeros(N_PAIRS, dtype=bool),
+    }
 
 
 def getMyPosition(prcSoFar):
-    global _pos, _last_n
+    global _state, _pos, _last_n
 
     prc     = np.asarray(prcSoFar, dtype=float)
     n_inst, n_days = prc.shape
     p_today = prc[:, -1]
     max_sh  = np.floor(CAPS / p_today).astype(int)
 
+    # Reset on restart
     if n_days <= _last_n:
-        _pos = np.zeros(N_INST, dtype=int)
+        _state = _init_state()
+        _pos   = np.zeros(N_INST, dtype=int)
     _last_n = n_days
 
-    if n_days < MIN_HISTORY:
-        _pos = np.clip(_pos, -max_sh, max_sh)
-        return _pos.copy()
+    if _state is None:
+        _state = _init_state()
 
-    log_p = np.log(prc)
+    log_today = np.log(p_today)
     target_dollars = np.zeros(N_INST)
 
-    for i, j, zw, band, aggr in PAIRS:
-        if max(i, j) >= n_inst or n_days < zw + 5:
+    for pidx, (i, j, zw, band, aggr, vlo, vhi, expanding, beta, alpha) in enumerate(PAIRS):
+        if max(i, j) >= n_inst:
             continue
 
-        ratio_full  = log_p[i, :] - log_p[j, :]      # all history
-        ratio_short = log_p[i, -zw:] - log_p[j, -zw:]  # short window
+        # Current spread value
+        s_now = log_today[i] - beta * log_today[j] - alpha
 
-        # 1. EXPANDING MEAN: best estimate of true long-run equilibrium
-        sm = ratio_full.mean()
+        # Update ring buffer (rolling window of zw values)
+        buf     = _state['buf'][pidx]
+        idx     = _state['buf_idx'][pidx]
+        old_val = buf[idx] if _state['buf_full'][pidx] else 0.0
+        buf[idx] = s_now
+        _state['buf_idx'][pidx] = (idx + 1) % zw
+        if not _state['buf_full'][pidx] and idx == zw - 1:
+            _state['buf_full'][pidx] = True
 
-        # 2. Rolling std for z-score (short window captures current regime vol)
-        ss = ratio_short.std()
-        if ss < 1e-12:
+        # Need full buffer before trading
+        if not _state['buf_full'][pidx]:
+            _state['sum1'][pidx] += s_now
+            _state['sum2'][pidx] += s_now * s_now
+            _state['count'][pidx] += 1
             continue
 
-        z = (ratio_full[-1] - sm) / ss
+        # Update expanding statistics
+        _state['sum1'][pidx] += s_now
+        _state['sum2'][pidx] += s_now * s_now
+        _state['count'][pidx] += 1
+        n = _state['count'][pidx]
 
+        # Short-window rolling std from ring buffer
+        ss_mean = buf.mean()
+        ss_var  = buf.var()
+        if ss_var < 1e-14:
+            continue
+        ss = np.sqrt(ss_var)
+
+        # Mean: expanding or rolling
+        if expanding:
+            sm = _state['sum1'][pidx] / n
+        else:
+            sm = ss_mean
+
+        # Volatility regime: long-run vol vs short-run vol
+        # Long-run: expanding std from running sum of squares
+        exp_mean = _state['sum1'][pidx] / n
+        exp_var  = max(_state['sum2'][pidx] / n - exp_mean ** 2, 0.0)
+        long_vol = np.sqrt(exp_var) if exp_var > 0 else ss
+
+        vol_mult = np.clip(long_vol / ss, vlo, vhi)
+
+        z = (s_now - sm) / ss
         if abs(z) <= band:
             continue
 
-        # 3. VOL COMPRESSION SIGNAL
-        long_vol  = ratio_full.std()         # long-term spread volatility
-        short_vol = ss                        # current spread volatility
-        vol_scale = np.clip(long_vol / short_vol, VOL_SCALE_LO, VOL_SCALE_HI)
-
-        f = np.tanh(aggr * z) * vol_scale
+        f = np.tanh(aggr * z) * vol_mult
         target_dollars[i] -= f * CAPS[i]
-        target_dollars[j] += f * CAPS[j]
+        target_dollars[j] += f * CAPS[j] * min(beta, 1.0)
 
-    # Clip to position limits
     target_dollars = np.clip(target_dollars, -CAPS, CAPS)
     target_sh = np.round(target_dollars / p_today).astype(int)
     target_sh = np.clip(target_sh, -max_sh, max_sh)
 
-    # Rebalance band: don't trade tiny position adjustments
     drift   = np.abs(target_sh - _pos) * p_today
     trade   = drift > REBAL_BAND * CAPS
     new_pos = _pos.copy()
