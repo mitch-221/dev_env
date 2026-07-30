@@ -1,21 +1,22 @@
 """
-MTAlpha v8 — 16 pairs, per-pair adaptive state.
-Sim score: ~943 full 1000 days. All 4 windows positive (766/1078/994/933).
+MTAlpha — 16 cointegrated pairs, adaptive per-pair sizing.
+Baked-in 1000-day prior state for zero warmup on finals (days 1001-1500).
 
-Per-pair configuration:
-  - OLS hedge ratio (beta, alpha) where it improves cointegration
-  - Expanding or rolling mean — chosen per pair by cross-validation
-  - Per-pair vol compression params (vlo, vhi) tuned on all 4 windows
-  - All parameters state held across calls in _state dict
-
-How it works per pair:
-  spread[t] = log(P_i[t]) - beta*log(P_j[t]) - alpha
-  sm = expanding mean of spread (or rolling, pair-specific)
-  ss = rolling std of spread over zw days
+HOW IT WORKS:
+  spread[t] = log(P_i) - beta*log(P_j) - alpha  (OLS hedge for pairs that need it)
+  sm = expanding mean of all spread history (or rolling for 2 pairs)
+  ss = rolling std over zw days (rolling std = local vol)
   z  = (spread[t] - sm) / ss
-  vol_mult = clip(long_run_vol / ss, vlo, vhi)
-  position = tanh(aggr * z) * vol_mult * cap
+  vol_scale = clip(long_run_vol / ss, vlo, vhi)
+         → LOW ss (spread compressed) = size UP (spring loaded, strong signal)
+         → HIGH ss (spread noisy) = size DOWN (regime disruption)
+  position = tanh(aggr * z) * vol_scale * cap
+
+STATE: incrementally maintained ring buffer (no recomputation).
+PRIOR_STATE: hardcoded 1000-day statistics so strategy trades at full
+accuracy from day 1001 without any warmup period.
 """
+
 import numpy as np
 
 N_INST = 51
@@ -42,26 +43,55 @@ PAIRS = [
     ( 9,11,30,1.00,20.0, 0.0,5.0, True, 1.0000, 0.000000),  # DUCT/NPCK
 ]
 
-REBAL_BAND  = 0.05
-MIN_HISTORY = max(int(zw) for _,_,zw,_,_,_,_,_,_,_ in PAIRS) + 10
+# Precomputed statistics from days 1-1000 of prices.txt
+# Format: (sum1, sum2, count, buf) where buf = last zw spread values
+PRIOR_STATE = [
+    (66.57384478, 14.31938634, 1000, [0.13945571,0.12269079,0.14373974,0.13690813,0.15756335,0.17243071,0.21124652,0.20391219,0.17759138,0.15012583,0.14616815,0.19465865,0.21730128,0.26129854,0.19596862,0.16540963,0.21792042,0.20230002,0.18596131,0.20760445,0.20546759,0.19117481,0.21332810,0.20930415]),
+    (53.79742560, 11.64158670, 1000, [0.13812933,0.12573408,0.10954598,0.09537082,0.06581406,0.05635294,0.05810979,0.05367831,0.04751578,0.00523040,0.01591228,-0.00283722,0.00749424,0.06550137,0.00229095,0.03628567,0.02816162,0.01911766,0.05436001,0.00908434,0.06476536,0.06911886]),
+    (287.09991992, 86.50787308, 1000, [0.18953866,0.16808215,0.15768201,0.18955529,0.21759436,0.24412647,0.24567849,0.22864364,0.23484302,0.24186507,0.26381676,0.25424647,0.20163223,0.23028687,0.22290285,0.22526601,0.26421873]),
+    (-65.16673088, 6.16336197, 1000, [-0.02611999,-0.01752235,-0.02018162,-0.01213145,-0.02731726,-0.02106360,-0.01412075,-0.02031418,-0.04839450,-0.02921214,-0.01341787,-0.04961399]),
+    (-500.92487593, 254.19244728, 1000, [-0.38926373,-0.41003006,-0.40344013,-0.41770183,-0.42462803,-0.36749983,-0.40677059,-0.39113461,-0.39023807,-0.42998707,-0.41448706,-0.44255987,-0.47228237,-0.43385093,-0.44745471,-0.42562708]),
+    (307.06491240, 95.99124105, 1000, [0.38632680,0.35678471,0.35868686,0.36255889,0.38531433,0.38708224,0.37212359,0.38095927,0.37277629,0.40482624,0.39822352,0.38060981,0.35785263,0.36647815]),
+    (-682.81184128, 469.99482481, 1000, [-0.82943037,-0.81215047,-0.78316937,-0.79167970,-0.77805696,-0.75730912,-0.80886678,-0.78484033,-0.74648944,-0.73446067,-0.70252656,-0.67436210,-0.69613023,-0.70895885,-0.76105271,-0.75141609,-0.77817018,-0.80488367,-0.80135353,-0.80745788,-0.82437708,-0.81650555,-0.82843406]),
+    (100.68615865, 12.94542898, 1000, [0.01220520,-0.00419875,-0.01201456,-0.04861150,-0.02750019,-0.03353391,-0.00994835,0.00940077,-0.02026901,0.00378072,-0.02001221,-0.00268354,-0.00268508,0.02126739,0.03714659,0.04512607,0.05993394,0.02886094,0.03132165]),
+    (-190.08310275, 38.28357277, 1000, [-0.18856448,-0.20685170,-0.22183093,-0.22095297,-0.22014346,-0.20636581,-0.25758404,-0.23880517,-0.25354679,-0.21814397,-0.22305678,-0.22157301,-0.21435668,-0.19111141,-0.19111141,-0.15769029,-0.15191051,-0.12580232,-0.14932629,-0.17655310,-0.17552572,-0.16503450,-0.17220823,-0.15775169,-0.17160334,-0.17453617,-0.15260601,-0.16157061,-0.12996633,-0.13442527]),
+    (0.03929738, 6.25983118, 1000, [-0.03740519,-0.01980256,-0.02657064,-0.02681209,-0.06426957,-0.08344784,-0.09946351,-0.10299879,-0.10792249,-0.11142360,-0.12579697,-0.12546017,-0.17484127,-0.20311988,-0.21772136,-0.20541545,-0.20002586,-0.18769917,-0.18509123,-0.17696878,-0.16611221,-0.12883135,-0.14082752,-0.09193791,-0.03419529,-0.02763411,-0.00723525,0.02091510,0.07738862,0.06996586,0.05424041,0.04694065,0.02477381,0.01356019,0.05285877,0.03994502,0.03298015,0.01122006,0.04535493,0.02001026,0.02183813,0.00598268,-0.00222723,0.03196018,0.02881243,0.04019189]),
+    (-301.13596041, 92.33522300, 1000, [-0.30372642,-0.31202724,-0.29173738,-0.25540786,-0.24566911,-0.26124476,-0.26500370,-0.27036641,-0.29511296,-0.26081048,-0.27802720,-0.24898043,-0.26230840,-0.25263583,-0.25880510,-0.25037270,-0.26573831,-0.26984810,-0.26185894,-0.26718201,-0.29338415,-0.29400492,-0.28458186,-0.28642229,-0.29275087,-0.28603959,-0.27268156,-0.30343335]),
+    (1158.55380422, 1355.22112542, 1000, [1.03092027,1.04633006,1.07287198,1.11829934,1.11807179,1.12378668,1.16577982,1.20250192,1.18894224,1.16298324,1.15516809,1.15104210,1.13886225,1.18263114,1.19421584,1.19347614,1.12730083,1.14605302,1.13800726,1.11463297,1.11911721,1.13509756,1.11799094,1.09423027,1.09131330,1.11672491,1.09844234,1.08309206,1.07671931,1.11204330,1.13448164,1.17132087,1.16316680,1.19243230,1.20023448,1.21111713,1.20893007,1.17963299,1.19413694,1.21064352,1.24733511,1.26904340,1.28006608,1.25851874,1.27753864,1.28192127,1.27652514,1.24573107,1.25501743,1.22872857,1.21971511,1.22568972,1.26505698,1.22297667,1.24738862,1.25373229,1.27249188,1.26358816,1.23047782,1.23062637]),
+    (-0.16081399, 40.77990924, 1000, [0.23939448,0.19213016,0.18464486,0.14817211,0.13505984,0.09263929,0.08353802,0.04367320,0.02400651,0.02951084,0.04444786,0.01451156,-0.02335927,-0.04856218,-0.08701485,-0.10070926,-0.10772048,-0.11526702,-0.09978824,-0.06240615,-0.01682205,0.01690381,0.01124422,-0.00691317,-0.00172496,0.00828858,0.02094178,0.07801211,0.17271471,0.19471032,0.17973444,0.11291486,0.12179335,0.09881068,0.10316898,0.07963848,0.08114368,0.10397039,0.13080164,0.16235311,0.16662601,0.15028256,0.18887625,0.22855484,0.21212006,0.19123757,0.19184147,0.19150891,0.12168970,0.10091940,0.02306527,-0.00767910,0.03438321,0.08041381,0.11721566,0.20111243,0.18700055,0.16703029,0.14104688,0.14021371]),
+    (-0.24557949, 14.43716756, 1000, [0.13522963,0.11243078,0.11874921,0.11293419,0.09395757,0.09542165,0.06940049,0.06593760,0.05796057,0.10116011,0.09742547,0.06163917,0.04896575,0.05173055,0.03375788,0.02193889,0.02191073,0.00963532,0.04604100,0.00866888,-0.02311819,-0.04900991,-0.01813121,-0.00747893,0.00097976,-0.01134390,-0.04961616,-0.06931370,-0.08260499,-0.10397287]),
+    (-0.08557543, 13.60066905, 1000, [0.05633408,0.04047474,0.08921691,0.12075099,0.09992652,0.08718119,0.03739840,0.02915954,0.02289998,0.05563641]),
+    (507.26049340, 281.59668549, 1000, [0.57825432,0.57518111,0.56564554,0.52576414,0.50966889,0.50762283,0.46492564,0.45273927,0.46912912,0.45438791,0.45652657,0.44031184,0.44454156,0.43043803,0.42841242,0.42732136,0.42073258,0.40865200,0.41973832,0.38657116,0.38275204,0.35110390,0.34539663,0.35002156,0.34164318,0.35927075,0.40875072,0.38273686,0.37389864,0.39188585]),
+]
 
-# Per-pair running state — updated every call
-# Each pair gets: spread_sum, spread_sum_sq, spread_count (for expanding mean/var)
-# Plus last zw spread values (ring buffer for rolling std)
+REBAL_BAND = 0.05
+N_PAIRS    = len(PAIRS)
+PRIOR_DAYS = PRIOR_STATE[0][2]  # = 1000
+
 _state   = None
 _pos     = np.zeros(N_INST, dtype=int)
 _last_n  = 0
 
-N_PAIRS = len(PAIRS)
 
-
-def _init_state():
-    """Initialise per-pair state buffers."""
+def _load_prior():
+    """Initialise state from baked-in 1000-day statistics."""
     return {
-        'sum1':    np.zeros(N_PAIRS),   # running sum of spread
-        'sum2':    np.zeros(N_PAIRS),   # running sum of spread^2
+        'sum1':    np.array([s[0] for s in PRIOR_STATE]),
+        'sum2':    np.array([s[1] for s in PRIOR_STATE]),
+        'count':   np.array([s[2] for s in PRIOR_STATE], dtype=int),
+        'buf':     [np.array(s[3]) for s in PRIOR_STATE],
+        'buf_idx': np.zeros(N_PAIRS, dtype=int),
+        'buf_full':np.ones(N_PAIRS, dtype=bool),
+    }
+
+
+def _init_fresh():
+    """Cold-start state (used when n_days < PRIOR_DAYS)."""
+    return {
+        'sum1':    np.zeros(N_PAIRS),
+        'sum2':    np.zeros(N_PAIRS),
         'count':   np.zeros(N_PAIRS, dtype=int),
-        'buf':     [np.zeros(zw) for _,_,zw,_,_,_,_,_,_,_ in PAIRS],
+        'buf':     [np.zeros(PAIRS[p][2]) for p in range(N_PAIRS)],
         'buf_idx': np.zeros(N_PAIRS, dtype=int),
         'buf_full':np.zeros(N_PAIRS, dtype=bool),
     }
@@ -75,15 +105,38 @@ def getMyPosition(prcSoFar):
     p_today = prc[:, -1]
     max_sh  = np.floor(CAPS / p_today).astype(int)
 
-    # Reset on restart
+    # Detect restart (n_days going backwards or equal)
     if n_days <= _last_n:
-        _state = _init_state()
+        _state = None
         _pos   = np.zeros(N_INST, dtype=int)
-    _last_n = n_days
 
+    # Initialise state
     if _state is None:
-        _state = _init_state()
+        if n_days > PRIOR_DAYS:
+            # Finals: load pre-baked 1000-day state, then replay days 1001..n_days-1
+            _state = _load_prior()
+            # Replay any new days beyond day 1000 that we haven't processed
+            log_p = np.log(prc)
+            for t in range(PRIOR_DAYS, n_days - 1):
+                for pidx, (i, j, zw, *_) in enumerate(PAIRS):
+                    beta  = PAIRS[pidx][8]
+                    alpha = PAIRS[pidx][9]
+                    s_now = log_p[i, t] - beta * log_p[j, t] - alpha
+                    buf   = _state['buf'][pidx]
+                    idx   = _state['buf_idx'][pidx]
+                    buf[idx] = s_now
+                    _state['buf_idx'][pidx] = (idx + 1) % zw
+                    _state['sum1'][pidx] += s_now
+                    _state['sum2'][pidx] += s_now ** 2
+                    _state['count'][pidx] += 1
+        elif n_days == PRIOR_DAYS:
+            # Exactly at end of known data: load prior directly
+            _state = _load_prior()
+        else:
+            # Before known data ends: cold start
+            _state = _init_fresh()
 
+    _last_n = n_days
     log_today = np.log(p_today)
     target_dollars = np.zeros(N_INST)
 
@@ -91,46 +144,34 @@ def getMyPosition(prcSoFar):
         if max(i, j) >= n_inst:
             continue
 
-        # Current spread value
         s_now = log_today[i] - beta * log_today[j] - alpha
 
-        # Update ring buffer (rolling window of zw values)
-        buf     = _state['buf'][pidx]
-        idx     = _state['buf_idx'][pidx]
-        old_val = buf[idx] if _state['buf_full'][pidx] else 0.0
+        # Update ring buffer
+        buf = _state['buf'][pidx]
+        idx = _state['buf_idx'][pidx]
         buf[idx] = s_now
         _state['buf_idx'][pidx] = (idx + 1) % zw
-        if not _state['buf_full'][pidx] and idx == zw - 1:
-            _state['buf_full'][pidx] = True
-
-        # Need full buffer before trading
-        if not _state['buf_full'][pidx]:
-            _state['sum1'][pidx] += s_now
-            _state['sum2'][pidx] += s_now * s_now
-            _state['count'][pidx] += 1
-            continue
 
         # Update expanding statistics
         _state['sum1'][pidx] += s_now
-        _state['sum2'][pidx] += s_now * s_now
+        _state['sum2'][pidx] += s_now ** 2
         _state['count'][pidx] += 1
-        n = _state['count'][pidx]
 
-        # Short-window rolling std from ring buffer
-        ss_mean = buf.mean()
-        ss_var  = buf.var()
-        if ss_var < 1e-14:
+        if not _state['buf_full'][pidx]:
+            if _state['count'][pidx] >= zw:
+                _state['buf_full'][pidx] = True
+            else:
+                continue
+
+        n   = _state['count'][pidx]
+        ss  = buf.std()
+        if ss < 1e-12:
             continue
-        ss = np.sqrt(ss_var)
 
-        # Mean: expanding or rolling
-        if expanding:
-            sm = _state['sum1'][pidx] / n
-        else:
-            sm = ss_mean
+        # Mean: expanding (most pairs) or rolling (LSST/BENI, AETS/FCSG)
+        sm = _state['sum1'][pidx] / n if expanding else buf.mean()
 
-        # Volatility regime: long-run vol vs short-run vol
-        # Long-run: expanding std from running sum of squares
+        # Volatility regime
         exp_mean = _state['sum1'][pidx] / n
         exp_var  = max(_state['sum2'][pidx] / n - exp_mean ** 2, 0.0)
         long_vol = np.sqrt(exp_var) if exp_var > 0 else ss
