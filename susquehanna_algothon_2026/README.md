@@ -72,10 +72,3 @@ Kept to show how the approach developed rather than just the final answer:
 - **`universe_exp.py`** — backtests two structurally-designed pairs
   (CTGI/EELT, MTNS/BENI) confirmed by both cointegration and ratio-stationarity
   tests, including EELT as a sub-index against each partner.
-
-## Files not included here
-
-`prices.txt` (competition price data) and `requirements-dev.txt` are provided
-by the organisers for local development and aren't part of a submission —
-see the [Algothon wiki](https://wiki.algothon.au/) for the current rules and
-data.
