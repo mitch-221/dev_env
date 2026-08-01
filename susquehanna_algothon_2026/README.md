@@ -41,12 +41,12 @@ position clipping, per-asset commissions).
 
 Kept to show how the approach developed rather than just the final answer:
 
-- **`teamName_v7.py`** — first working version: 17 disjoint cointegrated pairs
+- **`teamName_v2.py`** — first working version: 17 disjoint cointegrated pairs
   only, asset-disjoint (no shared exposure). Score ~678, Sharpe ~8.4. Adding a
   factor-residual overlay on top of this was tried and *dropped* — it cost 186
   score points by fighting the pair positions on shared assets, which is what
   motivated the disjoint-triplet design in the final version instead.
-- **`teamName_v4.py`** — added an ALGO return-residual fade (ALGO's return
+- **`teamName_v1.py`** — added an ALGO return-residual fade (ALGO's return
   minus its fitted basket return has Hurst ≈ 0.011, i.e. strongly same-day
   mean-reverting) on top of two structurally cointegrated pairs.
 
