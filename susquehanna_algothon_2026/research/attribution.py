@@ -11,7 +11,7 @@ Usage:
 
 import sys
 import numpy as np
-import teamName_v2 as S
+import teamName_v1 as S
 import eval_strategy as E
 
 
