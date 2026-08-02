@@ -58,7 +58,7 @@ def objective(pnl):
 
 
 def main(path):
-    import teamName_v3 as S
+    import teamName_v1 as S
 
     print("=" * 70)
     print("1. WIRING CHECK")
