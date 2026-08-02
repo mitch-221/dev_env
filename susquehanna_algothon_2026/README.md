@@ -72,3 +72,9 @@ Kept to show how the approach developed rather than just the final answer:
 - **`universe_exp.py`** — backtests two structurally-designed pairs
   (CTGI/EELT, MTNS/BENI) confirmed by both cointegration and ratio-stationarity
   tests, including EELT as a sub-index against each partner.
+  - **`attribution.py`** — component attribution: isolates resid-only, market-only,
+  and combined performance to confirm each piece is pulling its weight rather
+  than one component carrying the score.
+- **`eval_strategy.py`** — standalone evaluator for any strategy module under
+  the exact competition protocol (segments, clipping, commissions), used to
+  sanity-check components in isolation before wiring them into the final file.
