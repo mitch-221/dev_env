@@ -72,7 +72,7 @@ def run(prc, getMyPosition, start=WARM):
     return pnl, volume
 
 
-def main(path, mod_name="teamName_v2"):
+def main(path, mod_name="teamName_v1"):
     prc = load_prices(path)
     n_days = prc.shape[1]
     mod = importlib.import_module(mod_name)
@@ -104,4 +104,4 @@ if __name__ == "__main__":
     if len(sys.argv) < 2:
         print("Usage: python eval_strategy.py prices.txt [strategy_module]")
         sys.exit(1)
-    main(sys.argv[1], sys.argv[2] if len(sys.argv) > 2 else "teamName_v2")
+    main(sys.argv[1], sys.argv[2] if len(sys.argv) > 2 else "teamName_v1")
