@@ -25,6 +25,9 @@
 # patient has three rows: `REST`, `LEG` ("feet on the pedals"), `PEAK`.
 
 # %%
+import os
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -34,13 +37,22 @@ from sklearn.cluster import KMeans
 sns.set_theme(style="whitegrid")
 RANDOM_STATE = 12345
 
+# Where the three dataset .txt files live. Fixed to the shared project
+# folder so this runs the same whether it's executed from a GitHub checkout,
+# this machine, or anywhere else — override with the DATA_DIR environment
+# variable if you ever need to point it elsewhere without editing the file.
+DATA_DIR = Path(os.environ.get(
+    "DATA_DIR",
+    r"C:\Users\mitch\OneDrive\1   B.ENGG\0   POLIMI\Bayesian Statistics\Project\r_code_datasets_wd",
+))
+
 # %% [markdown]
 # ## 1. Load the raw data
 
 # %%
-list1 = pd.read_table("dataset1.txt")
-list2 = pd.read_table("dataset2.txt")
-list3 = pd.read_table("dataset3.txt")
+list1 = pd.read_table(DATA_DIR / "dataset1.txt")
+list2 = pd.read_table(DATA_DIR / "dataset2.txt")
+list3 = pd.read_table(DATA_DIR / "dataset3.txt")
 assert len(list1) == len(list2) == len(list3)
 
 dataset = pd.DataFrame({
