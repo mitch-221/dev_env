@@ -10,15 +10,12 @@
 # %% [markdown]
 # # Phase 1 — Replicating the Published Study
 #
-# This notebook replicates the one clustering pipeline the paper — Caravita
+# Replication of Paper — Caravita
 # et al. (2026), *Pulmonary Circulation*, "Hemodynamic-driven staging of
 # HFpEF" — actually reports: unscaled k-means (k=5) on 8 of 14 hemodynamic
 # variables, selected by a stated correlation-threshold rule. `script.r`
 # (the group's reference code) contains this pipeline too, but buried inside
 # six variants (scaled/unscaled × continuous-all/continuous-subset/binary);
-# this notebook keeps only the one branch that matches the paper, and
-# derives the variable-selection step from the real published correlation
-# table instead of copying a hardcoded list.
 #
 # **Source files:** `dataset1.txt`, `dataset2.txt`, `dataset3.txt` — raw
 # per-patient, per-exercise-step right-heart-catheterization data. Each
@@ -38,11 +35,6 @@ from sklearn.cluster import KMeans
 
 sns.set_theme(style="whitegrid")
 RANDOM_STATE = 12345
-
-# Where the three dataset .txt files live. Fixed to the shared project
-# folder so this runs the same whether it's executed from a GitHub checkout,
-# this machine, or anywhere else — override with the DATA_DIR environment
-# variable if you ever need to point it elsewhere without editing the file.
 DATA_DIR = Path(os.environ.get(
     "DATA_DIR",
     r"C:\Users\mitch\OneDrive\1   B.ENGG\0   POLIMI\Bayesian Statistics\Project\r_code_datasets_wd",
