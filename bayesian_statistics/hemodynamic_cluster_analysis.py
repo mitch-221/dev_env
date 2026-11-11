@@ -26,6 +26,8 @@
 
 # %%
 import os
+os.environ.setdefault("OMP_NUM_THREADS", "1")  # avoids a known KMeans/MKL warning on Windows
+
 from pathlib import Path
 
 import numpy as np
@@ -100,6 +102,19 @@ dataset.head()
 # The real published 14×14 Pearson correlation matrix, transcribed from
 # e-Table 1 in the paper's Supporting Information — not recomputed, so this
 # is their actual numbers.
+#
+# For two variables $x$ and $y$ measured on the same $n$ patients, the
+# Pearson correlation coefficient is
+#
+# $$
+# r_{xy} = \frac{\sum_{i=1}^{n}(x_i - \bar{x})(y_i - \bar{y})}
+#               {\sqrt{\sum_{i=1}^{n}(x_i - \bar{x})^2}\sqrt{\sum_{i=1}^{n}(y_i - \bar{y})^2}}
+# $$
+#
+# i.e. the sample covariance of $x$ and $y$, normalized by their standard
+# deviations, giving a value in $[-1, 1]$. The paper's rule — drop one
+# variable from any pair with $|r_{xy}| \geq 0.80$ — is just a threshold on
+# this quantity, applied pairwise over all $\binom{14}{2}=91$ pairs.
 
 # %%
 _M = [
@@ -227,6 +242,29 @@ print(f"{len(X_full)} -> {len(X)} patients after dropping incomplete rows "
 # > "we adopted the k-means clustering method, with the Euclidean distance
 # > on the actual measurements without further normalization [...] k = 5
 # > was set as the number of clusters."
+#
+# Given $n$ patients as points $\mathbf{x}_1, \dots, \mathbf{x}_n \in
+# \mathbb{R}^{18}$ (the 18 columns built in Section 4) and a fixed number of
+# clusters $k$, k-means looks for cluster assignments $c_i \in \{1,\dots,k\}$
+# and centroids $\boldsymbol{\mu}_1, \dots, \boldsymbol{\mu}_k$ that minimize
+# the within-cluster sum of squares (WCSS):
+#
+# $$
+# \text{WCSS} = \sum_{j=1}^{k} \sum_{i:\, c_i = j} \lVert \mathbf{x}_i - \boldsymbol{\mu}_j \rVert_2^2,
+# \qquad
+# \boldsymbol{\mu}_j = \frac{1}{|\{i : c_i = j\}|}\sum_{i:\, c_i = j} \mathbf{x}_i
+# $$
+#
+# — plain squared Euclidean distance, unweighted, exactly as the paper
+# specifies ("without further normalization": no per-variable scaling, so a
+# variable on a larger numeric scale, like PVR, mechanically dominates the
+# distance over one on a smaller scale, like cardiac index). This has no
+# closed-form solution; `sklearn`'s `KMeans` minimizes it by Lloyd's
+# algorithm (iteratively reassigning points to the nearest centroid, then
+# recomputing centroids) from `n_init=10` random starts, keeping the best.
+# $k$ itself isn't estimated by this objective — WCSS only ever decreases as
+# $k$ grows — which is why the elbow plot below is a visual heuristic, not a
+# statistic, and why the paper (and this script) just fixes $k=5$ by eye.
 
 # %%
 X_arr = X.drop(columns="ID").to_numpy()
@@ -347,3 +385,58 @@ print(outlier_counts[outlier_counts > 0])
 #   concentration, the outlier counts) as explicit checks on the Phase 2
 #   model — e.g. does it still favor the same 8 variables, does it handle
 #   the outliers sensibly without needing them manually screened out.
+#
+# ### What the Bayesian model actually looks like
+#
+# Where k-means hard-codes $k$ and gives each patient a single label, a
+# Dirichlet process (DP) mixture treats the number of clusters itself as
+# unknown and places a prior over it. Each patient's data vector
+# $\mathbf{x}_i$ is assumed drawn from one of (countably many, in principle)
+# component distributions, with mixture weights $\pi_j$ drawn from a
+# **stick-breaking** construction:
+#
+# $$
+# \pi_j = \beta_j \prod_{l=1}^{j-1}(1-\beta_l), \qquad
+# \beta_j \sim \text{Beta}(1, \alpha), \qquad j = 1, 2, 3, \dots
+# $$
+#
+# where $\alpha$ is a concentration parameter controlling how readily new
+# clusters are created (larger $\alpha$ → more clusters). Each patient gets
+# a latent cluster label $z_i \sim \text{Categorical}(\pi_1, \pi_2, \dots)$,
+# and conditional on $z_i = j$, their data is modeled as
+#
+# $$
+# \mathbf{x}_i \mid z_i = j \;\sim\; \mathcal{N}(\boldsymbol{\mu}_j, \boldsymbol{\Sigma}_j)
+# $$
+#
+# — a multivariate normal per cluster, replacing k-means' implicit
+# "distance to a point" with an actual likelihood, so clusters can differ
+# in spread and orientation, not just location. Priors are placed on the
+# per-cluster parameters themselves (e.g. a Normal-Inverse-Wishart prior on
+# $(\boldsymbol{\mu}_j, \boldsymbol{\Sigma}_j)$), making the whole thing
+# fully Bayesian.
+#
+# Fitting this means sampling from the posterior
+# $p(\mathbf{z}, \{\boldsymbol{\mu}_j, \boldsymbol{\Sigma}_j\}, \alpha \mid
+# \mathbf{x}_1,\dots,\mathbf{x}_n)$ — intractable in closed form, so Phase 2
+# will use a Gibbs sampler. The key step, at each iteration, resamples each
+# patient's cluster label conditional on everyone else's (the Chinese
+# Restaurant Process form of the DP), with probability of joining an
+# existing cluster $j$ (holding $n_j$ current members) or starting a new
+# one roughly:
+#
+# $$
+# p(z_i = j \mid \mathbf{z}_{-i}, \mathbf{x}_i) \;\propto\;
+# \begin{cases}
+# n_j \cdot p(\mathbf{x}_i \mid \boldsymbol{\mu}_j, \boldsymbol{\Sigma}_j) & \text{existing cluster } j \\[4pt]
+# \alpha \cdot p(\mathbf{x}_i) & \text{new cluster}
+# \end{cases}
+# $$
+#
+# where $\mathbf{z}_{-i}$ is every other patient's current assignment and
+# $p(\mathbf{x}_i)$ is the prior-predictive density for a brand-new cluster.
+# Running many such sweeps and keeping the post-burn-in draws gives a
+# posterior distribution over the number of clusters, over each patient's
+# cluster (as a distribution across samples, not a single number — this is
+# what directly answers "probability of belonging to each cluster"), and
+# over the cluster-specific parameters themselves.
