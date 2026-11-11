@@ -265,44 +265,9 @@ plt.tight_layout()
 plt.show()
 
 # %% [markdown]
-# ## 6. Example: one patient's cluster-membership "probability"
+# ## 6. Data quality assessment
 #
-# k-means itself only produces a hard assignment — there's no probability
-# model behind it. As an illustrative, non-model-based stand-in, this
-# converts each patient's distance to the 5 centroids into a soft weight
-# (closer centroid -> higher weight, weights sum to 1). **This is a
-# heuristic, not a posterior probability** — it has no proper statistical
-# justification, which is exactly the gap the Bayesian mixture model in
-# Phase 2 actually fills: *that* model produces a real posterior cluster
-# membership probability per patient, derived from the likelihood, not from
-# an ad hoc distance transform.
-
-# %%
-def soft_membership(point, centroids):
-    d = np.linalg.norm(centroids - point, axis=1)
-    w = 1.0 / (d + 1e-9)
-    return w / w.sum()
-
-patient_probs = np.array([soft_membership(row, centroids) for row in X_arr])
-prob_df = pd.DataFrame(patient_probs, columns=[f"cluster_{c}" for c in range(1, 6)])
-prob_df.insert(0, "ID", X["ID"].values)
-prob_df.insert(1, "hard_cluster", X_labeled["cluster"].values)
-
-# One confident example and one ambiguous example (smallest margin between
-# top two clusters), to show both ends of what this heuristic looks like.
-margin = patient_probs.max(axis=1) - np.sort(patient_probs, axis=1)[:, -2]
-confident_idx = margin.argmax()
-ambiguous_idx = margin.argmin()
-
-print("Most confident assignment (example):")
-print(prob_df.iloc[[confident_idx]].round(3))
-print("\nMost ambiguous assignment (example):")
-print(prob_df.iloc[[ambiguous_idx]].round(3))
-
-# %% [markdown]
-# ## 7. Data quality assessment
-#
-# ### 7a. Variable inventory
+# ### 6a. Variable inventory
 
 # %%
 print(f"Continuous hemodynamic variables (14 screened for correlation): {hemo_vars}")
@@ -313,7 +278,7 @@ print("\nNote: the paper's clinical characteristics (age, sex, NT-proBNP, LVEF, 
       "hemodynamic catheterization data only.")
 
 # %% [markdown]
-# ### 7b. Missingness and structural gaps
+# ### 6b. Missingness and structural gaps
 
 # %%
 missing_by_step = (
@@ -337,7 +302,7 @@ print(f"\n{len(X_full)} -> {len(X)} patients survive dropna() for the clustering
 print(na_per_col)
 
 # %% [markdown]
-# ### 7c. Outlier screen
+# ### 6c. Outlier screen
 
 # %%
 hemo_z = (dataset[hemo_vars] - dataset[hemo_vars].mean()) / dataset[hemo_vars].std()
@@ -346,18 +311,39 @@ print("Rows with |z| > 3 (vs. the rest of this sample), per variable:")
 print(outlier_counts[outlier_counts > 0])
 
 # %% [markdown]
-# ## Summary
+# ## Limitations of this replication
 #
-# - Variable selection: the paper's stated rule, applied to the real
-#   correlation table, is almost but not completely reproducible — it
-#   mechanically gives 9 variables, the paper reports 8, and the extra drop
-#   (`RAP.MEDIA.CO.f.slp`) isn't explained in the text.
-# - n = 80 after dropping incomplete rows matches the paper exactly, and our
-#   recomputed correlation matrix matches e-Table 1 to within ~0.0005 —
-#   strong evidence this is the same underlying cohort.
-# - Cluster sizes are in the same ballpark as the paper's 26/30/12/4/8 but
-#   not identical — expected, given k-means' sensitivity to initialization
-#   and the one unresolved variable-selection discrepancy above.
-# - Phase 2 replaces both the imposed k=5 and the heuristic soft-assignment
-#   in Section 6 with an actual Bayesian posterior: a distribution over the
-#   number of clusters, and a real per-patient membership probability.
+# - **Variable selection isn't fully reproducible.** The paper's stated
+#   tie-break rule, applied mechanically to the real correlation table,
+#   yields 9 variables; the paper reports 8. The extra survivor
+#   (`RAP.MEDIA.CO.f.slp`) isn't correlated ≥0.80 with anything else left,
+#   so its exclusion isn't explained by the Methods as written — we drop it
+#   anyway to match what they actually report.
+# - **k is imposed, not inferred.** k=5 comes from an "elbow, although not
+#   very pronounced" the paper describes qualitatively — not a criterion
+#   anyone could re-run and get the same answer from.
+# - **Cluster assignment is a hard, deterministic label.** k-means gives
+#   each patient exactly one cluster with no notion of confidence or
+#   borderline membership, and is sensitive to initialization — our sizes
+#   (18/13/29/8/12) land in the same ballpark as the paper's (26/30/12/4/8)
+#   but don't match exactly, and there's no way to tell, from k-means alone,
+#   whether that gap is noise or a real difference in cohort/implementation.
+# - **No uncertainty quantification anywhere** — not on cluster count, not
+#   on membership, not on the variable-selection step itself.
+#
+# ## Next steps (Phase 2)
+#
+# - Replace k-means with a Bayesian nonparametric mixture model (Dirichlet
+#   process / infinite mixture) so the number of clusters is inferred from
+#   the data, with a posterior distribution over k instead of an imposed 5.
+# - Get a real posterior cluster-membership probability per patient, in
+#   place of a hard label — lets us flag borderline patients honestly
+#   rather than forcing a single answer.
+# - Feed in the full 8-variable, 3-step (REST/LEG/PEAK) + slope structure
+#   used here, so the model sees what script.r and the paper actually
+#   measured, not a simplification of it.
+# - Use the correlation/variable-selection discrepancy and the data-quality
+#   findings above (ID 83's missing LEG step, the RAP.VY missingness
+#   concentration, the outlier counts) as explicit checks on the Phase 2
+#   model — e.g. does it still favor the same 8 variables, does it handle
+#   the outliers sensibly without needing them manually screened out.
