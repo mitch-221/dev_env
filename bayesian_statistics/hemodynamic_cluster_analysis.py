@@ -10,12 +10,15 @@
 # %% [markdown]
 # # Phase 1 — Replicating the Published Study
 #
-# Replication of Paper — Caravita
+# This notebook replicates the one clustering pipeline the paper — Caravita
 # et al. (2026), *Pulmonary Circulation*, "Hemodynamic-driven staging of
 # HFpEF" — actually reports: unscaled k-means (k=5) on 8 of 14 hemodynamic
 # variables, selected by a stated correlation-threshold rule. `script.r`
 # (the group's reference code) contains this pipeline too, but buried inside
 # six variants (scaled/unscaled × continuous-all/continuous-subset/binary);
+# this notebook keeps only the one branch that matches the paper, and
+# derives the variable-selection step from the real published correlation
+# table instead of copying a hardcoded list.
 #
 # **Source files:** `dataset1.txt`, `dataset2.txt`, `dataset3.txt` — raw
 # per-patient, per-exercise-step right-heart-catheterization data. Each
@@ -35,6 +38,11 @@ from sklearn.cluster import KMeans
 
 sns.set_theme(style="whitegrid")
 RANDOM_STATE = 12345
+
+# Where the three dataset .txt files live. Fixed to the shared project
+# folder so this runs the same whether it's executed from a GitHub checkout,
+# this machine, or anywhere else — override with the DATA_DIR environment
+# variable if you ever need to point it elsewhere without editing the file.
 DATA_DIR = Path(os.environ.get(
     "DATA_DIR",
     r"C:\Users\mitch\OneDrive\1   B.ENGG\0   POLIMI\Bayesian Statistics\Project\r_code_datasets_wd",
@@ -319,6 +327,16 @@ print("% missing per hemodynamic variable, by STEP:")
 missing_by_step
 
 # %%
+fig, ax = plt.subplots(figsize=(10, 5))
+missing_by_step.T.plot(kind="bar", ax=ax)
+ax.set_ylabel("% missing")
+ax.set_title("Missingness per hemodynamic variable, by exercise step")
+ax.legend(title="STEP")
+plt.xticks(rotation=45, ha="right")
+plt.tight_layout()
+plt.show()
+
+# %%
 irregular_ids = [
     pid for pid, counts in dataset.groupby("ID")["STEP"].value_counts().unstack(fill_value=0).iterrows()
     if not (counts == 1).all() or len(counts) < 3
@@ -331,6 +349,15 @@ print(f"\n{len(X_full)} -> {len(X)} patients survive dropna() for the clustering
       f"({len(X_full) - len(X)} dropped). Columns responsible:")
 print(na_per_col)
 
+if len(na_per_col) > 0:
+    fig, ax = plt.subplots(figsize=(8, 4))
+    na_per_col.plot(kind="barh", ax=ax, color="indianred")
+    ax.invert_yaxis()
+    ax.set_xlabel("Patients dropped (missing this column)")
+    ax.set_title("Which columns drive the dropna() loss in the clustering input matrix")
+    plt.tight_layout()
+    plt.show()
+
 # %% [markdown]
 # ### 6c. Outlier screen
 
@@ -339,6 +366,14 @@ hemo_z = (dataset[hemo_vars] - dataset[hemo_vars].mean()) / dataset[hemo_vars].s
 outlier_counts = (hemo_z.abs() > 3).sum().sort_values(ascending=False)
 print("Rows with |z| > 3 (vs. the rest of this sample), per variable:")
 print(outlier_counts[outlier_counts > 0])
+
+fig, ax = plt.subplots(figsize=(8, 5))
+outlier_counts[outlier_counts > 0].plot(kind="barh", ax=ax, color="darkorange")
+ax.invert_yaxis()
+ax.set_xlabel("Rows with |z| > 3")
+ax.set_title("Outlier screen — hemodynamic variables")
+plt.tight_layout()
+plt.show()
 
 # %% [markdown]
 # ## Limitations of this replication
