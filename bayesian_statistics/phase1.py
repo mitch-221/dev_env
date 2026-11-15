@@ -388,17 +388,65 @@ SENSITIVITY_NOTES.append({
 })
 
 # %% [markdown]
-# **Decision for the model (Phase 2): use the paper's published 8 continuous
-# variables**, not the mechanically-derived 9, and not the larger
-# domain-blind 43. Reasons:
+# **Decision for the model (Phase 2, revised): use the mechanically-derived
+# 9 continuous variables**, not the paper's published 8. Rationale: the
+# paper's own stated rule, applied to the real data, produces 9 — the
+# published 8 drops a 9th survivor (`RAP.MEDIA.CO.f.slp`) for a reason not
+# stated anywhere in the Methods text we have. Deferring to the published
+# number over our own correct application of their stated method would mean
+# arbitrarily matching their result rather than following their process —
+# a different (and worse-justified) thing to optimize for, given this
+# project's own model is already an original extension of the paper, not a
+# literal reproduction of it. The 8-vs-9 and clinical-vs-blind discrepancies
+# (§5) remain valuable, reported sensitivity-analysis material regardless of
+# which set is used as the actual model input.
 #
-# 1. **Interpretability** — the brief wants clinically interpretable
-#    profiles; a missingness-based tie-break has no clinical grounding.
-# 2. **Dimensionality, given n=80** — more variables (9, or 43) directly
-#    worsens the covariance-feasibility problem quantified in §6.
-# 3. **The 8-vs-9 and clinical-vs-blind discrepancies are themselves good
-#    sensitivity-analysis material** (required-analysis item 7) — reporting
-#    them honestly is more valuable than silently resolving them.
+# This changes the continuous block to 19 patient-level dimensions (5
+# step-varying variables × 3 steps = 15, plus 4 slope-type variables × 1 = 4
+# — `RAP.MEDIA.CO.f.slp` is itself a slope-type variable).
+
+SENSITIVITY_NOTES.append({
+    "decision": "Use the mechanically-derived 9 continuous variables, not the paper's published 8",
+    "finding": (
+        "Applying the paper's own stated correlation rule to their 14 candidates and their own "
+        "clinical tie-break yields 9 survivors; the paper publishes 8, dropping RAP.MEDIA.CO.f.slp "
+        "for a reason not documented in the available Methods text."
+    ),
+    "implication": (
+        "Matching the paper's published 8 exactly would mean following their RESULT rather than "
+        "their STATED METHOD. Since Phase 2 builds an original model (not a literal replication), "
+        "using the 9 that the stated method actually produces is the more defensible choice. "
+        "Continuous block becomes 19 dimensions (15 step-varying + 4 slope-type), not 18."
+    ),
+})
+
+# %% [markdown]
+# **Revised categorical/binary block.** Three of the 5 "non-numeric"
+# columns from §1 were excluded only because the type-classifier expects
+# numeric 0/1 — their actual values are perfectly interpretable: `SESSO`
+# (F/M — sex), `RITMO` (FA/RS — Fibrillazione Atriale vs. Ritmo Sinusale,
+# i.e. atrial fibrillation vs. sinus rhythm, a standard HF comorbidity), and
+# `BA` (n/y — meaning unclear, but unambiguously binary). All three are
+# confirmed patient-level constants (0/89 patients vary across STEP — see
+# check below), unlike the original 7 flags, so there's no "which STEP"
+# question for them at all. They're added to the categorical block,
+# recoded to 0/1. The remaining two non-numeric columns stay excluded for a
+# different reason than "unclear meaning": `VO2.` is 100% missing, and
+# `INSP.EXP.AVG` has exactly one distinct value in the entire dataset (zero
+# variance) — both carry no information regardless of what they mean.
+#
+# Categorical/binary block is now **10 variables**: `PH`, `HFpEF`,
+# `stiff.LA`, `high.PVR`, `RHF`, `TR`, `low.CO` (PEAK-step), `SESSO`,
+# `RITMO`, `BA` (patient-level constant, any row).
+
+# %%
+for v in ["SESSO", "RITMO", "BA"]:
+    col = v if v in full.columns else None
+    if col is None:
+        continue
+    nun = full.groupby("ID")[col].apply(lambda s: s.dropna().nunique())
+    print(f"{v}: varies for {(nun > 1).sum()}/{full['ID'].nunique()} patients "
+          f"(0 confirms patient-level constant); values: {full[col].dropna().unique()}")
 
 # %% [markdown]
 # ## 6. Covariance structure: parameter counting and a feasibility check
@@ -489,8 +537,7 @@ print("\nNo binary candidates beyond the paper's 7 were found in the raw files a
 # %% [markdown]
 # ## 8. Final variable set
 #
-# **Continuous block — 8 variables, 18 patient-level dimensions after
-# REST/LEG/PEAK (or PEAK-only, for slope variables) expansion:**
+# **Continuous block — 9 variables, 19 patient-level dimensions:**
 #
 # | Variable | Steps | Columns |
 # |---|---|---|
@@ -502,18 +549,24 @@ print("\nNo binary candidates beyond the paper's 7 were found in the raw files a
 # | PAWP.MEDIA.CO.f.slp | PEAK only (slope) | 1 |
 # | PAPM.CO.f.slp | PEAK only (slope) | 1 |
 # | COVO2.slp | PEAK only (slope) | 1 |
+# | RAP.MEDIA.CO.f.slp | PEAK only (slope) | 1 |
 #
-# **Binary block — 7 variables, 1 PEAK-step value each (per §0):**
+# **Binary/categorical block — 10 variables:**
 #
-# `PH`, `HFpEF`, `stiff.LA`, `high.PVR`, `RHF`, `TR`, `low.CO`
+# `PH`, `HFpEF`, `stiff.LA`, `high.PVR`, `RHF`, `TR`, `low.CO` (PEAK-step
+# value), `SESSO`, `RITMO`, `BA` (patient-level constant, recoded to 0/1).
 #
-# **Excluded:** the 5 non-numeric columns (§1) pending a data dictionary;
-# the 37 extra continuous survivors from §4's naive screen (not clinically
-# reasoned, and the dimensionality argument in §6 rules them out anyway).
+# **Excluded:** `VO2.` (100% missing) and `INSP.EXP.AVG` (zero variance —
+# one value in the whole dataset) — excluded for lack of information, not
+# unclear meaning; the 37 extra continuous survivors from §4's naive screen
+# (not clinically reasoned, and the dimensionality argument in §6 rules
+# them out anyway).
 
 # %%
-print("CONTINUOUS BLOCK (8 variables / 18 dims):", PAPER_CLUSTER_VARS)
-print("BINARY BLOCK (7 variables, PEAK-step):", PAPER_BINARY_VARS)
+CONTINUOUS_BLOCK = sorted(set(PAPER_CLUSTER_VARS) | {"RAP.MEDIA.CO.f.slp"})
+CATEGORICAL_BLOCK = PAPER_BINARY_VARS + ["SESSO", "RITMO", "BA"]
+print(f"CONTINUOUS BLOCK (9 variables / 19 dims): {CONTINUOUS_BLOCK}")
+print(f"CATEGORICAL/BINARY BLOCK (10 variables): {CATEGORICAL_BLOCK}")
 
 # %% [markdown]
 # ## 9. Modelling strategy for Phase 2 (defined here, executed there)
@@ -528,16 +581,31 @@ print("BINARY BLOCK (7 variables, PEAK-step):", PAPER_BINARY_VARS)
 # columns before fitting, so no variable dominates purely by numeric scale
 # (resolves Phase 0's unscaled-Euclidean limitation).
 #
-# **Step 2 — Continuous kernel: diagonal Gaussian / per-dimension NIG.**
-# Justified in §6 by cluster-size feasibility, not just tractability.
+# **Step 2 — Continuous kernel: block-diagonal Gaussian.** Not pure
+# diagonal: each of the 5 step-varying variables gets its own 3x3
+# covariance block (Normal-Inverse-Wishart), correlating that variable's
+# own REST/LEG/PEAK readings with each other — the correlation is real
+# (same physiological quantity, measured 3 times) and ignoring it is what
+# drove the earlier 8-9-cluster over-fragmentation. Different variables'
+# blocks stay independent of each other (full 19x19 is infeasible, proven
+# in §6); the 4 slope-type variables stay plain 1-D NIG (no triplet to
+# correlate). This is a genuine multivariate Gaussian within each block,
+# not a diagonal approximation — only its *scope* (3 dims, not 19) is
+# restricted, to match what n=80 can actually support (a 3x3 block needs
+# n_cluster>=4 to be well-posed, vs n_cluster>=20 for the full matrix).
 #
-# **Step 3 — Binary kernel: per-dimension Bernoulli, Beta-Bernoulli
-# conjugate.** Each cluster $h$ has its own probability $p_{h,\ell}$ of
-# each binary flag being 1; a patient's binary vector is most likely under
-# whichever cluster's $(p_{h,1},\dots,p_{h,7})$ pattern it's closest to in
-# Hamming distance — i.e. this independent-Bernoulli-per-dimension form
-# *is* the Hamming-distance kernel the brief suggests (Argiento, Filippi
-# Mazzola & Paci 2025), not an approximation of it.
+# **Step 3 — Binary/categorical kernel: per-dimension Bernoulli, Beta-
+# Bernoulli conjugate, over all 10 categorical variables (§8).** Each
+# cluster $h$ has its own probability $p_{h,\ell}$ of each flag being 1; a
+# patient's categorical vector is most likely under whichever cluster's
+# $(p_{h,1},\dots,p_{h,10})$ pattern it's closest to in Hamming distance —
+# i.e. this independent-Bernoulli-per-dimension form *is* the Hamming-
+# distance kernel the brief suggests (Argiento, Filippi Mazzola & Paci
+# 2025), not an approximation of it. Cross-flag correlation (e.g. HFpEF
+# with RHF) is handled through having multiple distinct cluster profiles,
+# not assumed away — a materially different situation from the continuous
+# case, where the correlation is between repeated measurements of the same
+# quantity, not between genuinely different variables.
 #
 # **Step 4 — Shared stick-breaking DP prior.** Truncated at $H=15$
 # (Ishwaran & James 2001 / book Algorithm 4), with concentration $M \sim
