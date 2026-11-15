@@ -1,5 +1,5 @@
 # ---
-# title: "HFpEF Bayesian Clustering — Phase 2: Two-Block Dirichlet Process Mixture Model"
+# title: "HFpEF Bayesian Clustering — Phase 2: Two-Block DP Mixture, Block-Diagonal Covariance"
 # author: "Mitch Wishart"
 # format:
 #   html:
@@ -10,15 +10,16 @@
 # %% [markdown]
 # # Phase 2 — Executing the Modelling Strategy
 #
-# This notebook executes the strategy defined in Phase 1 §9, step by step.
-# Every decision below was already justified in Phase 1 with numbers, not
-# intuition — this notebook's job is to build the model, not re-argue for
-# it; each step below references back to where its justification lives.
+# Executes Phase 1 §9's strategy, revised: **9 continuous variables** (the
+# mechanically-derived set, not the paper's published 8 — Phase 1's
+# sensitivity note explains why), **block-diagonal covariance** for the
+# continuous kernel (not pure diagonal — see "The model" below), and a
+# **10-variable categorical/binary block** (the original 7 PEAK-step flags
+# plus `SESSO`, `RITMO`, `BA`, recoded to 0/1).
 #
-# **One latent cluster label per patient, two blocks, one shared posterior:**
-# a patient's clinical stage is one thing, expressed through both their
-# continuous hemodynamics and their binary phenotype at once — not two
-# separately-fit models compared afterwards.
+# One latent cluster label per patient, two blocks, one shared posterior —
+# a patient's clinical stage is one thing, expressed through continuous
+# hemodynamics and binary/categorical phenotype at once.
 
 # %%
 import os
@@ -29,6 +30,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
 from scipy import stats
+from scipy.stats import invwishart, multivariate_normal
 
 sns.set_theme(style="whitegrid")
 RNG = np.random.default_rng(12345)
@@ -41,12 +43,16 @@ DATA_DIR = Path(os.environ.get(
 # %% [markdown]
 # ## Load data and build both blocks
 #
-# Continuous block: the paper's 8 variables (Phase 1 §5, §8), standardized.
-# Binary block: the paper's 7 flags, taken at **PEAK step specifically**
-# — Phase 1 §0 found these are exercise-dependent diagnostic classifications,
-# not fixed patient labels (e.g. HFpEF prevalence goes from ~40% at REST to
-# ~89% at PEAK), so using any other row, or an assumed patient-level
-# constant, would silently change the categorical block's whole model.
+# Continuous: 9 variables — 5 step-varying (`PAWP.MEDIA`, `PAWP.V.AMPL`,
+# `PVR.MEDIA`, `RAP.VY`, `CI`) get REST/LEG/PEAK columns; 4 slope-type
+# (`PAWP.MEDIA.CO.f.slp`, `PAPM.CO.f.slp`, `COVO2.slp`,
+# `RAP.MEDIA.CO.f.slp`) get one column each. 19 dims total.
+#
+# Categorical/binary: 7 flags at PEAK step (Phase 1 §0 — these are
+# exercise-dependent diagnostic classifications, not patient-level
+# constants) plus `SESSO`/`RITMO`/`BA`, which genuinely are patient-level
+# constants (confirmed in Phase 1, 0/89 patients vary across STEP), recoded
+# to 0/1.
 
 # %%
 list1 = pd.read_table(DATA_DIR / "dataset1.txt")
@@ -56,6 +62,8 @@ list3 = pd.read_table(DATA_DIR / "dataset3.txt")
 dataset = pd.DataFrame({
     "ID": list1["ID"].astype(int),
     "STEP": list1["STEP"].astype("category"),
+    "SESSO": list1["SESSO"],
+    "RITMO": list1["RITMO"],
     "PAWP.MEDIA": list1["PAWP.MEDIA"].astype(float),
     "PAWP.V.AMPL": list2["PAWP.V.AMPL"].astype(float),
     "PAWP.MEDIA.CO.f.slp": list2["PAWP.MEDIA.CO.f.slp"].astype(float),
@@ -64,6 +72,8 @@ dataset = pd.DataFrame({
     "CI": list2["CI"].astype(float),
     "COVO2.slp": list2["COVO2.slp"].astype(float),
     "PAPM.CO.f.slp": list2["PAPM.CO.f.slp"].astype(float),
+    "BA": list2["BA"],
+    "RAP.MEDIA.CO.f.slp": list3["RAP.MEDIA.CO.f.slp"].astype(float),
     "PH": list3["PH"].astype(float),
     "HFpEF": list3["HFpEF"].astype(float),
     "stiff_LA": list3["stiff.LA"].astype(float),
@@ -76,9 +86,16 @@ dataset = pd.DataFrame({
 peak_covo2 = dataset.loc[dataset["STEP"] == "PEAK"].set_index("ID")["COVO2.slp"]
 dataset["COVO2.slp"] = dataset["ID"].map(peak_covo2)
 
+# Recode the newly-added categorical variables to 0/1.
+dataset["SESSO"] = (dataset["SESSO"] == "M").astype(float)      # 1 = male
+dataset["RITMO"] = (dataset["RITMO"] == "FA").astype(float)     # 1 = atrial fibrillation
+dataset["BA"] = (dataset["BA"] == "y").astype(float)
+
 step_varying = ["PAWP.MEDIA", "PAWP.V.AMPL", "PVR.MEDIA", "RAP.VY", "CI"]
-slope_vars = ["PAWP.MEDIA.CO.f.slp", "PAPM.CO.f.slp", "COVO2.slp"]
-binary_vars = ["PH", "HFpEF", "stiff_LA", "high_PVR", "RHF", "TR", "low_CO"]
+slope_vars = ["PAWP.MEDIA.CO.f.slp", "PAPM.CO.f.slp", "COVO2.slp", "RAP.MEDIA.CO.f.slp"]
+peak_binary_vars = ["PH", "HFpEF", "stiff_LA", "high_PVR", "RHF", "TR", "low_CO"]
+constant_binary_vars = ["SESSO", "RITMO", "BA"]
+binary_vars = peak_binary_vars + constant_binary_vars
 
 rest = dataset.loc[dataset["STEP"] == "REST"].drop(columns="STEP").add_suffix("_REST")
 leg = dataset.loc[dataset["STEP"] == "LEG"].drop(columns="STEP").add_suffix("_LEG")
@@ -87,12 +104,13 @@ for df in (rest, leg, peak):
     df.rename(columns={df.columns[0]: "ID"}, inplace=True)
 
 patients = rest.merge(leg, on="ID").merge(peak, on="ID")
-for v in slope_vars:
-    patients[v] = patients[f"{v}_PEAK"]
-    patients.drop(columns=[f"{v}_REST", f"{v}_LEG", f"{v}_PEAK"], inplace=True)
-for v in binary_vars:
-    patients[v] = patients[f"{v}_PEAK"]
-    patients.drop(columns=[f"{v}_REST", f"{v}_LEG", f"{v}_PEAK"], inplace=True)
+for v in slope_vars + constant_binary_vars:
+    patients[v] = patients[f"{v}_PEAK"]  # slope: genuinely single-valued; constants: any step is identical
+for v in peak_binary_vars:
+    patients[v] = patients[f"{v}_PEAK"]  # exercise-dependent flags: PEAK specifically (Phase 1 §0)
+patients.drop(columns=[c for c in patients.columns
+                        if any(c.startswith(f"{v}_") for v in slope_vars + binary_vars)],
+              inplace=True)
 
 cluster_cols = [f"{v}_{s}" for v in step_varying for s in ("REST", "LEG", "PEAK")] + slope_vars
 patients_full = patients[["ID"] + cluster_cols + binary_vars].dropna().reset_index(drop=True)
@@ -101,161 +119,183 @@ patient_ids = patients_full["ID"].to_numpy()
 n = len(patients_full)
 d_cont = len(cluster_cols)
 d_bin = len(binary_vars)
-print(f"n = {n} patients, continuous block d = {d_cont} dims, binary block d = {d_bin} dims")
+print(f"n = {n} patients, continuous block d = {d_cont} dims, binary/categorical block d = {d_bin} dims")
 print(f"Continuous columns: {cluster_cols}")
-print(f"Binary columns (PEAK step): {binary_vars}")
+print(f"Binary/categorical columns: {binary_vars}")
 
 X_raw = patients_full[cluster_cols].to_numpy()
 col_mean, col_sd = X_raw.mean(axis=0), X_raw.std(axis=0)
-X = (X_raw - col_mean) / col_sd                      # Step 1: standardize continuous block
-B = patients_full[binary_vars].to_numpy()            # binary block, already 0/1
+X = (X_raw - col_mean) / col_sd
+B = patients_full[binary_vars].to_numpy()
+
+# Index bookkeeping: which columns of X belong to which block.
+block_idx = {v: [cluster_cols.index(f"{v}_{s}") for s in ("REST", "LEG", "PEAK")] for v in step_varying}
+slope_idx = [cluster_cols.index(v) for v in slope_vars]
 
 # %% [markdown]
 # ## The model
-#
-# Shared cluster label, two conditionally-independent blocks given that
-# label:
-#
-# $$
-# y_i \mid r_i = h \;\sim\; \prod_{j=1}^{d_{\text{cont}}} \mathcal{N}(\mu_{hj}, \sigma_{hj}^2),
-# \qquad
-# b_i \mid r_i = h \;\sim\; \prod_{\ell=1}^{d_{\text{bin}}} \text{Bernoulli}(p_{h\ell})
-# $$
 #
 # $$
 # r_i \mid \mathbf{w} \sim \text{Categorical}(w_1,\dots,w_H), \qquad
 # w_h = v_h \prod_{\ell<h}(1-v_\ell), \qquad v_h \sim \text{Beta}(1, M)
 # $$
 #
-# **Continuous kernel — diagonal Gaussian / NIG per dimension.** Phase 1 §6
-# showed this isn't the easier option among several, it's close to the only
-# numerically well-posed one at these cluster sizes: a full covariance
-# matrix needs n_cluster >= d+1 just to be invertible, and every cluster
-# Phase 0 actually produced fails that test at d=18, let alone the
-# unfiltered d=32+.
+# **Continuous likelihood — block-diagonal, not pure diagonal:**
 #
-# **Binary kernel — independent Bernoulli per dimension, Beta-Bernoulli
-# conjugate.** This is the brief's suggested Hamming-distance kernel in
-# its working form: a patient's 7-flag vector is most probable under
-# whichever cluster's characteristic pattern $(p_{h,1},\dots,p_{h,7})$ it's
-# closest to in Hamming distance, because the Bernoulli log-likelihood
-# $\sum_\ell [b_{i\ell}\log p_{h\ell} + (1-b_{i\ell})\log(1-p_{h\ell})]$ is
-# maximized exactly when $b_i$ matches $p_h$'s rounded pattern — the
-# independence-per-dimension form isn't a simplification bolted on
-# separately from the Hamming-kernel idea, it's the same idea written as a
-# likelihood instead of a distance.
+# $$
+# y_i \mid r_i=h \;\sim\; \Big[\prod_{v \in \text{step-varying}} \mathcal{N}_3(\mathbf{y}_{i,v}; \boldsymbol\mu_{h,v}, \boldsymbol\Sigma_{h,v})\Big]
+# \times \Big[\prod_{j \in \text{slope}} \mathcal{N}(y_{ij}; \mu_{hj}, \sigma_{hj}^2)\Big]
+# $$
 #
-# **Why both blocks share one $r_i$, not two separate partitions.** The
-# brief's "clinical stage" is a property of the patient, not of a block —
-# if the two blocks had separate cluster labels, "stage 3" would mean
-# different things depending on which block you asked, which isn't a
-# coherent clinical staging system. The joint likelihood below enforces one
-# label driving both.
+# Each step-varying variable gets its own genuine 3-dimensional Gaussian
+# (real 3x3 covariance $\boldsymbol\Sigma_{h,v}$, correlating that
+# variable's own REST/LEG/PEAK readings) via a Normal-Inverse-Wishart (NIW)
+# conjugate update — the matrix generalization of the Normal-Inverse-Gamma
+# update already used for the slope variables. Different variables' blocks
+# stay independent of each other (full 19x19 is infeasible — Phase 1 §6:
+# determinant ~1e-224 at realistic cluster sizes); each 3x3 block only
+# needs n_cluster>=4 to be well-posed, which every cluster we've produced
+# clears easily.
+#
+# **Categorical/binary likelihood — independent Bernoulli per dimension,
+# Beta-Bernoulli conjugate, across all 10 variables.** This is the brief's
+# suggested Hamming-distance kernel in its working form (Phase 1 §9).
 
 # %%
-H = 15  # truncation level (Phase 1 §9 / Phase 0 prototype: well above paper's k=5)
+H = 15
 
-m0 = np.zeros(d_cont)
-kappa0 = 1.0
-a0, b0 = 2.0, 1.0           # E[sigma^2] = b0/(a0-1) = 1, matching standardized scale
-a_bin, b_bin = 1.0, 1.0     # Beta(1,1) = uniform prior on each p_h,l
-ga_a, ga_b = 1.0, 1.0       # Gamma(a,b) hyperprior on M (shape-rate)
+# NIW hyperparameters for each 3-dim block (shared prior across h and v).
+p_blk = 3
+m0_blk = np.zeros(p_blk)
+kappa0_blk = 1.0
+nu0_blk = p_blk + 2                      # = 5, smallest integer giving a proper, weakly informative prior
+Psi0_blk = np.eye(p_blk) * (nu0_blk - p_blk - 1)   # = I, so E[Sigma] = I (matches standardized scale)
+
+# NIG hyperparameters for the 4 slope (1-D) dimensions.
+m0, kappa0, a0, b0 = 0.0, 1.0, 2.0, 1.0
+
+# Beta-Bernoulli hyperparameters for the 10 categorical dimensions.
+a_bin, b_bin = 1.0, 1.0
+EPS = 1e-9
+
+ga_a, ga_b = 1.0, 1.0   # Gamma hyperprior on M
+
+
+def sample_niw_posterior(Y):
+    """NIW posterior draw for a 3-dim block, given Y: (n_h, 3)."""
+    nj = len(Y)
+    if nj == 0:
+        Sigma = invwishart.rvs(df=nu0_blk, scale=Psi0_blk, random_state=RNG)
+        mu = RNG.multivariate_normal(m0_blk, Sigma / kappa0_blk)
+        return mu, Sigma
+    ybar = Y.mean(axis=0)
+    diff_y = Y - ybar
+    S = diff_y.T @ diff_y
+    kappa_n = kappa0_blk + nj
+    nu_n = nu0_blk + nj
+    m_n = (kappa0_blk * m0_blk + nj * ybar) / kappa_n
+    d0 = (ybar - m0_blk).reshape(-1, 1)
+    Psi_n = Psi0_blk + S + (kappa0_blk * nj / kappa_n) * (d0 @ d0.T)
+    Sigma = invwishart.rvs(df=nu_n, scale=Psi_n, random_state=RNG)
+    mu = RNG.multivariate_normal(m_n, Sigma / kappa_n)
+    return mu, Sigma
 
 
 def sample_nig_posterior(y_col):
-    """Draw (mu, sigma2) from the NIG posterior given a 1-D sample y_col."""
+    """NIG posterior draw for one 1-D slope dimension."""
     nj = len(y_col)
     if nj == 0:
         sigma2 = stats.invgamma.rvs(a0, scale=b0, random_state=RNG)
-        mu = RNG.normal(0.0, np.sqrt(sigma2 / kappa0))
+        mu = RNG.normal(m0, np.sqrt(sigma2 / kappa0))
         return mu, sigma2
     ybar = y_col.mean()
     ss = ((y_col - ybar) ** 2).sum()
     kappa_n = kappa0 + nj
     a_n = a0 + nj / 2
     b_n = b0 + 0.5 * ss + (kappa0 * nj * ybar ** 2) / (2 * kappa_n)
-    m_n = (kappa0 * 0.0 + nj * ybar) / kappa_n
+    m_n = (kappa0 * m0 + nj * ybar) / kappa_n
     sigma2 = stats.invgamma.rvs(a_n, scale=b_n, random_state=RNG)
     mu = RNG.normal(m_n, np.sqrt(sigma2 / kappa_n))
     return mu, sigma2
 
 
 def sample_beta_bernoulli_posterior(b_col):
-    """Draw p from the Beta-Bernoulli posterior given a 1-D 0/1 sample b_col."""
     nj = len(b_col)
     n1 = b_col.sum() if nj else 0
-    n0 = nj - n1
-    return RNG.beta(a_bin + n1, b_bin + n0)
+    return RNG.beta(a_bin + n1, b_bin + (nj - n1))
 
 
 # %% [markdown]
-# ## Joint Gibbs sampler (Phase 1 §9, Step 5)
+# ## Joint Gibbs sampler
 
 # %%
-n_iter, burn_in = 3000, 1000
-EPS = 1e-9  # clips p away from exactly 0/1 for safe log()
+n_iter, burn_in = 2000, 700
 
 r = RNG.integers(0, 5, size=n)
 M = 1.0
-mu = np.zeros((H, d_cont))
-sigma2 = np.ones((H, d_cont))
+mu_blk = {v: np.zeros((H, 3)) for v in step_varying}
+Sigma_blk = {v: np.tile(np.eye(3), (H, 1, 1)) for v in step_varying}
+mu_slope = np.zeros((H, len(slope_vars)))
+sigma2_slope = np.ones((H, len(slope_vars)))
 p_bin = np.full((H, d_bin), 0.5)
 
 n_occupied_trace = np.zeros(n_iter, dtype=int)
-M_trace = np.zeros(n_iter)
 r_samples = np.zeros((n_iter - burn_in, n), dtype=int)
 
 for it in range(n_iter):
-    # (a) continuous cluster parameters
-    for h in range(H):
-        members = X[r == h]
-        for j in range(d_cont):
-            mu[h, j], sigma2[h, j] = sample_nig_posterior(members[:, j] if len(members) else np.array([]))
+    members_mask = [r == h for h in range(H)]
 
-    # (b) binary cluster parameters
+    # (a) continuous block parameters
     for h in range(H):
-        members_b = B[r == h]
+        X_h = X[members_mask[h]]
+        for v in step_varying:
+            mu_blk[v][h], Sigma_blk[v][h] = sample_niw_posterior(X_h[:, block_idx[v]])
+        for j, sidx in enumerate(slope_idx):
+            mu_slope[h, j], sigma2_slope[h, j] = sample_nig_posterior(X_h[:, sidx])
+
+    # (b) categorical block parameters
+    for h in range(H):
+        B_h = B[members_mask[h]]
         for l in range(d_bin):
-            p_bin[h, l] = sample_beta_bernoulli_posterior(members_b[:, l] if len(members_b) else np.array([]))
+            p_bin[h, l] = sample_beta_bernoulli_posterior(B_h[:, l])
 
     # (c) stick-breaking weights
     counts = np.bincount(r, minlength=H)
-    A = counts
     Bc = np.array([counts[h + 1:].sum() for h in range(H)])
-    v = np.ones(H)
-    v[:-1] = RNG.beta(1 + A[:-1], M + Bc[:-1])
-    w = v * np.concatenate(([1.0], np.cumprod(1 - v[:-1])))
+    v_stick = np.ones(H)
+    v_stick[:-1] = RNG.beta(1 + counts[:-1], M + Bc[:-1])
+    w = v_stick * np.concatenate(([1.0], np.cumprod(1 - v_stick[:-1])))
     w = np.clip(w, 1e-300, None)
     w /= w.sum()
-
-    # (d) joint reassignment: continuous log-lik + binary log-lik
     log_w = np.log(w)
-    diff2 = (X[:, None, :] - mu[None, :, :]) ** 2
-    log_lik_cont = -0.5 * (np.log(2 * np.pi * sigma2[None, :, :]) + diff2 / sigma2[None, :, :])
 
+    # (d) joint reassignment: block-diagonal continuous log-lik + slope log-lik + binary log-lik
+    log_lik = np.tile(log_w, (n, 1))
+    for v in step_varying:
+        Y_v = X[:, block_idx[v]]
+        for h in range(H):
+            log_lik[:, h] += multivariate_normal.logpdf(Y_v, mean=mu_blk[v][h], cov=Sigma_blk[v][h])
+    for j, sidx in enumerate(slope_idx):
+        diff2 = (X[:, sidx:sidx + 1] - mu_slope[:, j][None, :]) ** 2
+        log_lik += -0.5 * (np.log(2 * np.pi * sigma2_slope[:, j][None, :]) + diff2 / sigma2_slope[:, j][None, :])
     p_safe = np.clip(p_bin, EPS, 1 - EPS)
-    log_lik_bin = (B[:, None, :] * np.log(p_safe)[None, :, :]
-                   + (1 - B[:, None, :]) * np.log(1 - p_safe)[None, :, :])
+    log_lik += (B[:, None, :] * np.log(p_safe)[None, :, :]
+                + (1 - B[:, None, :]) * np.log(1 - p_safe)[None, :, :]).sum(axis=2)
 
-    log_post = log_w[None, :] + log_lik_cont.sum(axis=2) + log_lik_bin.sum(axis=2)
-    log_post -= log_post.max(axis=1, keepdims=True)
-    probs = np.exp(log_post)
+    log_lik -= log_lik.max(axis=1, keepdims=True)
+    probs = np.exp(log_lik)
     probs /= probs.sum(axis=1, keepdims=True)
     r = np.array([RNG.choice(H, p=probs[i]) for i in range(n)])
 
-    # (e) update M (Escobar & West 1995 auxiliary variable scheme)
+    # (e) update M (Escobar & West 1995)
     k = len(np.unique(r))
     phi = RNG.beta(M + 1, n)
     rate = ga_b - np.log(phi)
     pi_mix = (ga_a + k - 1) / (n * rate)
     pi_mix = pi_mix / (1 + pi_mix)
-    if RNG.random() < pi_mix:
-        M = RNG.gamma(ga_a + k, 1 / rate)
-    else:
-        M = RNG.gamma(ga_a + k - 1, 1 / rate)
+    M = RNG.gamma(ga_a + k, 1 / rate) if RNG.random() < pi_mix else RNG.gamma(ga_a + k - 1, 1 / rate)
 
     n_occupied_trace[it] = k
-    M_trace[it] = M
     if it >= burn_in:
         r_samples[it - burn_in] = r
 
@@ -346,7 +386,7 @@ print("\nMost ambiguous patient (example):")
 print(prob_df.iloc[[ambiguous_idx]].round(3))
 
 # %% [markdown]
-# ## Cluster profiles — both blocks (required-analysis items 4 and 5)
+# ## Cluster profiles — both blocks
 
 # %%
 profile_df = patients_full.copy()
@@ -359,7 +399,6 @@ print("Cluster sizes:", dict(profile_df["cluster"].value_counts().sort_index()))
 print("Phase 0 (k-means, k=5 imposed) sizes: 18/13/29/8/12")
 print("Paper's published sizes: 26/30/12/4/8")
 
-# Continuous block: mean of each variable (PEAK value where step-varying) per cluster
 cont_profile_cols = [c for c in cluster_cols if c.endswith("_PEAK")] + slope_vars
 print("\nContinuous block means by cluster (PEAK / slope values):")
 print(profile_df.groupby("cluster")[cont_profile_cols].mean().round(2))
@@ -370,14 +409,13 @@ ax.set_title("Peak-exercise mean PAWP by cluster")
 plt.tight_layout()
 plt.show()
 
-# Binary block: prevalence of each flag per cluster
-print("\nBinary block prevalence by cluster:")
+print("\nCategorical/binary block prevalence by cluster:")
 print(profile_df.groupby("cluster")[binary_vars].mean().round(3))
 
-fig, ax = plt.subplots(figsize=(9, 4))
+fig, ax = plt.subplots(figsize=(10, 4))
 profile_df.groupby("cluster")[binary_vars].mean().T.plot(kind="bar", ax=ax)
 ax.set_ylabel("Prevalence")
-ax.set_title("Binary phenotype prevalence by cluster")
+ax.set_title("Binary/categorical phenotype prevalence by cluster")
 ax.legend(title="cluster", bbox_to_anchor=(1.02, 1), loc="upper left")
 plt.tight_layout()
 plt.show()
@@ -385,15 +423,19 @@ plt.show()
 # %% [markdown]
 # ## Summary
 #
-# - This is the two-block model the brief actually asks for — not the
-#   continuous-only prototype from the Phase 0 pipeline, and not two
-#   separately-fit models — one shared partition $r_i$, built and justified
-#   step by step in Phase 1.
-# - Every structural choice here (diagonal covariance, Beta-Bernoulli
-#   binary kernel, truncated stick-breaking DP, which 8+7 variables, which
-#   STEP to use for the binary flags) has its justification filed as a
-#   Phase 1 sensitivity note, not asserted here without support.
-# - Still outstanding, per Phase 1 §9 Step 7: the PAWP.A/RAP.V.AMPL
-#   sensitivity re-run, and a predictive example assigning a new,
-#   out-of-sample patient to these clusters — both required-analysis items,
-#   not yet built.
+# - Block-diagonal covariance replaces pure diagonal: each step-varying
+#   variable's REST/LEG/PEAK triplet now has a genuine 3x3 covariance,
+#   correlating with itself (a real multivariate Gaussian), while staying
+#   independent of other variables' blocks (full 19x19 remains infeasible).
+# - Continuous block uses the mechanically-derived 9 variables (Phase 1's
+#   revised decision), not the paper's published 8.
+# - Categorical/binary block expanded to 10 variables, adding `SESSO`,
+#   `RITMO`, `BA` (confirmed patient-level constants, unlike the original
+#   7 PEAK-step-dependent flags).
+# - Compare the posterior P(k) here against the earlier pure-diagonal,
+#   8-variable, 7-flag version: if block-diagonal covariance is doing what
+#   it's meant to, the posterior should concentrate closer to the paper's
+#   k=5 than the pure-diagonal model's 8-9.
+# - Still outstanding: the PAWP.A/RAP.V.AMPL sensitivity re-run, and a
+#   predictive example for a new, out-of-sample patient (required-analysis
+#   item 8) — neither built yet.
