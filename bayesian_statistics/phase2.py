@@ -104,10 +104,15 @@ for df in (rest, leg, peak):
     df.rename(columns={df.columns[0]: "ID"}, inplace=True)
 
 patients = rest.merge(leg, on="ID").merge(peak, on="ID")
-for v in slope_vars + constant_binary_vars:
-    patients[v] = patients[f"{v}_PEAK"]  # slope: genuinely single-valued; constants: any step is identical
+for v in slope_vars:
+    patients[v] = patients[f"{v}_PEAK"]  # genuinely single-valued; any step column is identical
 for v in peak_binary_vars:
     patients[v] = patients[f"{v}_PEAK"]  # exercise-dependent flags: PEAK specifically (Phase 1 §0)
+# SESSO/RITMO are only recorded on the REST row of the raw files (LEG/PEAK rows are
+# blank for these two columns) — confirmed empirically; BA is populated at every STEP.
+patients["SESSO"] = patients["SESSO_REST"]
+patients["RITMO"] = patients["RITMO_REST"]
+patients["BA"] = patients["BA_PEAK"]
 patients.drop(columns=[c for c in patients.columns
                         if any(c.startswith(f"{v}_") for v in slope_vars + binary_vars)],
               inplace=True)
