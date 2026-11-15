@@ -1,5 +1,5 @@
 # ---
-# title: "HFpEF Bayesian Clustering — Phase 1: Replicating Caravita et al. (2026)"
+# title: "HFpEF Bayesian Clustering — Phase 0: Replicating Caravita et al. (2026)"
 # author: "Mitch Wishart"
 # format:
 #   html:
@@ -8,7 +8,7 @@
 # ---
 
 # %% [markdown]
-# # Phase 1 — Replicating the Published Study
+# # Phase 0 — Replicating the Published Study
 #
 # This notebook replicates the one clustering pipeline the paper — Caravita
 # et al. (2026), *Pulmonary Circulation*, "Hemodynamic-driven staging of
@@ -19,6 +19,12 @@
 # this notebook keeps only the one branch that matches the paper, and
 # derives the variable-selection step from the real published correlation
 # table instead of copying a hardcoded list.
+#
+# This is pure replication, following their process exactly as reported.
+# Everything about *whether* their 8 variables (or their k-means method) are
+# actually the right choice for our own model is deferred to Phase 1
+# (variable assessment) and Phase 2 (the Bayesian model) — this notebook
+# only asks "did we reproduce what they reported."
 #
 # **Source files:** `dataset1.txt`, `dataset2.txt`, `dataset3.txt` — raw
 # per-patient, per-exercise-step right-heart-catheterization data. Each
@@ -95,6 +101,15 @@ slope_vars = ["PAWP_MIDA.CO.f.slp", "PAWP.MEDIA.CO.f.slp", "RAP.MEDIA.CO.f.slp",
 
 print(dataset["STEP"].value_counts())
 dataset.head()
+
+# %% [markdown]
+# **Note on the binary columns above** — these 7 flags are loaded here
+# exactly as `script.r` and the paper's variable list define them, for
+# inventory purposes only; this notebook's clustering step never uses them
+# (the paper's reported model is continuous-only). Phase 1 investigates
+# these 7 columns properly, including a structural finding about how they
+# actually behave across REST/LEG/PEAK that matters a lot once they
+# *are* used as model inputs in Phase 2.
 
 # %% [markdown]
 # ## 2. Correlation matrix (paper §2.2, e-Table 1)
@@ -204,8 +219,11 @@ cluster_vars = ["PAWP.MEDIA", "PAWP.V.AMPL", "PAWP.MEDIA.CO.f.slp", "PAPM.CO.f.s
 extra = survivors - set(cluster_vars)
 print(f"\nThe rule leaves 9 variables; the published list has 8. {extra} survives the rule "
       f"but isn't in the paper's final list, for reasons not stated in the Methods. "
-      f"Skipping to the paper's published 8 below, since the goal is replicating what "
-      f"they reported, not re-deriving a result they didn't fully document:")
+      f"Skipping to the paper's published 8 below, since the goal here is replicating what "
+      f"they reported, not re-deriving a result they didn't fully document. (Phase 1 revisits "
+      f"this exact 8-vs-9 discrepancy as a sensitivity-analysis finding, since it's not just a "
+      f"replication footnote — it says something about how much of the paper's variable choice "
+      f"is forced by the data vs. needs clinical judgement.)")
 print(cluster_vars)
 
 # %% [markdown]
@@ -310,10 +328,12 @@ plt.show()
 # %%
 print(f"Continuous hemodynamic variables (14 screened for correlation): {hemo_vars}")
 print(f"\nOf these, the 8 used for clustering: {cluster_vars}")
-print(f"\nCategorical/binary phenotype variables (7, profiling only, not clustering inputs): {binary_vars}")
-print("\nNote: the paper's clinical characteristics (age, sex, NT-proBNP, LVEF, etc. — "
-      "its Table 3) aren't present in dataset1/2/3.txt at all; those files are "
-      "hemodynamic catheterization data only.")
+print(f"\nCategorical/binary phenotype variables (7, profiling only here, not clustering inputs "
+      f"in this phase): {binary_vars}")
+print("\nNote: the paper's clinical characteristics (age, sex, NT-proBNP, LVEF, etc. — its "
+      "Table 3) ARE present in dataset1.txt (as ETA/SESSO/PESO/ALTEZZA/BMI), alongside many "
+      "other raw columns not used by this replication at all. Phase 1 assesses the full raw "
+      "file set (~124 candidate columns), not just the paper's named 21.")
 
 # %% [markdown]
 # ### 6b. Missingness and structural gaps
@@ -395,75 +415,10 @@ plt.show()
 #   whether that gap is noise or a real difference in cohort/implementation.
 # - **No uncertainty quantification anywhere** — not on cluster count, not
 #   on membership, not on the variable-selection step itself.
+# - **Only 21 of ~124 raw columns were ever considered**, and only on the
+#   paper's say-so. Phase 1 goes back to the full raw files and assesses
+#   that choice directly, rather than inheriting it uncritically.
 #
-# ## Next steps (Phase 2)
-#
-# - Replace k-means with a Bayesian nonparametric mixture model (Dirichlet
-#   process / infinite mixture) so the number of clusters is inferred from
-#   the data, with a posterior distribution over k instead of an imposed 5.
-# - Get a real posterior cluster-membership probability per patient, in
-#   place of a hard label — lets us flag borderline patients honestly
-#   rather than forcing a single answer.
-# - Feed in the full 8-variable, 3-step (REST/LEG/PEAK) + slope structure
-#   used here, so the model sees what script.r and the paper actually
-#   measured, not a simplification of it.
-# - Use the correlation/variable-selection discrepancy and the data-quality
-#   findings above (ID 83's missing LEG step, the RAP.VY missingness
-#   concentration, the outlier counts) as explicit checks on the Phase 2
-#   model — e.g. does it still favor the same 8 variables, does it handle
-#   the outliers sensibly without needing them manually screened out.
-#
-# ### What the Bayesian model actually looks like
-#
-# Where k-means hard-codes $k$ and gives each patient a single label, a
-# Dirichlet process (DP) mixture treats the number of clusters itself as
-# unknown and places a prior over it. Each patient's data vector
-# $\mathbf{x}_i$ is assumed drawn from one of (countably many, in principle)
-# component distributions, with mixture weights $\pi_j$ drawn from a
-# **stick-breaking** construction:
-#
-# $$
-# \pi_j = \beta_j \prod_{l=1}^{j-1}(1-\beta_l), \qquad
-# \beta_j \sim \text{Beta}(1, \alpha), \qquad j = 1, 2, 3, \dots
-# $$
-#
-# where $\alpha$ is a concentration parameter controlling how readily new
-# clusters are created (larger $\alpha$ → more clusters). Each patient gets
-# a latent cluster label $z_i \sim \text{Categorical}(\pi_1, \pi_2, \dots)$,
-# and conditional on $z_i = j$, their data is modeled as
-#
-# $$
-# \mathbf{x}_i \mid z_i = j \;\sim\; \mathcal{N}(\boldsymbol{\mu}_j, \boldsymbol{\Sigma}_j)
-# $$
-#
-# — a multivariate normal per cluster, replacing k-means' implicit
-# "distance to a point" with an actual likelihood, so clusters can differ
-# in spread and orientation, not just location. Priors are placed on the
-# per-cluster parameters themselves (e.g. a Normal-Inverse-Wishart prior on
-# $(\boldsymbol{\mu}_j, \boldsymbol{\Sigma}_j)$), making the whole thing
-# fully Bayesian.
-#
-# Fitting this means sampling from the posterior
-# $p(\mathbf{z}, \{\boldsymbol{\mu}_j, \boldsymbol{\Sigma}_j\}, \alpha \mid
-# \mathbf{x}_1,\dots,\mathbf{x}_n)$ — intractable in closed form, so Phase 2
-# will use a Gibbs sampler. The key step, at each iteration, resamples each
-# patient's cluster label conditional on everyone else's (the Chinese
-# Restaurant Process form of the DP), with probability of joining an
-# existing cluster $j$ (holding $n_j$ current members) or starting a new
-# one roughly:
-#
-# $$
-# p(z_i = j \mid \mathbf{z}_{-i}, \mathbf{x}_i) \;\propto\;
-# \begin{cases}
-# n_j \cdot p(\mathbf{x}_i \mid \boldsymbol{\mu}_j, \boldsymbol{\Sigma}_j) & \text{existing cluster } j \\[4pt]
-# \alpha \cdot p(\mathbf{x}_i) & \text{new cluster}
-# \end{cases}
-# $$
-#
-# where $\mathbf{z}_{-i}$ is every other patient's current assignment and
-# $p(\mathbf{x}_i)$ is the prior-predictive density for a brand-new cluster.
-# Running many such sweeps and keeping the post-burn-in draws gives a
-# posterior distribution over the number of clusters, over each patient's
-# cluster (as a distribution across samples, not a single number — this is
-# what directly answers "probability of belonging to each cluster"), and
-# over the cluster-specific parameters themselves.
+# This replication's job ends here. Whether 8 (or 9, or more) variables is
+# the right choice, and what kind of model should actually be built on top
+# of them, is Phase 1 and Phase 2's job — not re-litigated in this notebook.
