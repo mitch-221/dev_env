@@ -122,8 +122,8 @@ high_corr_pairs = (corr14.where(np.triu(np.ones(corr14.shape), k=1).astype(bool)
                    .stack().loc[lambda s: s.abs() >= 0.80].sort_values(ascending=False))
 print(f"{len(high_corr_pairs)} pairs at |r|>=0.80")
 
-# %% [markdown]#
-# ::: {.callout-Note}
+# %% [markdown]
+# ::: {.callout-note}
 # Applying the paper's own rule to their own data gives **9** survivors, not the published **8** -
 # RAP.MEDIA.CO.f.slp  has no correlation, |r|>0.80 (revisited properly in Phase 1).
 # :::
@@ -215,7 +215,7 @@ plt.show()
 
 # %% [markdown]
 # Same $n$, same variables, same unscaled Euclidean $k$-means - membership still differs. Most
-# plausible cause: $k$-means' sensitivity to random initialization and to unscaled distance, 
+# plausible cause: $k$-means' sensitivity to random initialization and to unscaled distance,
 # neither of which we could fully pin down from the published method.
 #
 # **What Phase 0 established, and its limits.** Two of the paper's own limitations become concrete
@@ -241,7 +241,11 @@ print(f"{len(candidate_cols)} raw candidate columns, {full['ID'].nunique()} pati
 # ## Data structure & a concrete correction
 #
 # Continuous variables vary by STEP except 5 "slope" variables, PEAK-only by design.
-# The 7 binary flags are not fixed patient labels either.
+# The 7 binary flags are not fixed patient labels either — their prevalence changes by exercise step,
+# not a static diagnosis. Two further variables, `SESSO` and `RITMO`, are genuine patient-level
+# constants rather than STEP-varying - but, unlike the slope variables, they turn out to be recorded
+# only at REST in the raw files, checked directly below. (A third patient-level constant, `BA`,
+# is picked up later in the categorical block.)
 
 # %%
 prevalence_by_step = full.groupby("STEP")[binary_vars_7_raw].mean().loc[["REST", "LEG", "PEAK"]]
@@ -411,7 +415,6 @@ print("A Gaussian density divides by sqrt(det(Sigma)) - determinants close to ze
 # Normal-Inverse-Wishart prior, the posterior will still be product. But
 # at these sample sizes the posterior is then almost entirely prior-driven. A full $19\times19$ covariance matrix
 # is not usable for handling correlated continuous variables at this sample size.
-# :::
 
 # %%
 comparison = pd.DataFrame({
@@ -470,7 +473,7 @@ print("NIW block posterior draw, n=6:\n  mu =", mu_demo.round(2), "\n  Sigma =\n
 # The 3 patient-level constants keep independent Beta-Bernoulli updates per cluster — the working form
 # of the Hamming-distance kernel the brief suggests. The 7 exercise-dependent flags are not
 # collapsed to a single value. Instead, each flag's full
-# (REST, LEG, PEAK) triplet is one of 8 joint categories, fit with a*Dirichlet-Multinomial - the
+# (REST, LEG, PEAK) triplet is one of 8 joint categories, fit with a Dirichlet-Multinomial - the
 # direct categorical counterpart of the continuous block's $3\times3$ NIW treatment.
 
 # %%
@@ -487,7 +490,9 @@ theta_demo = sample_dirichlet_posterior(demo_cats, demo_rng)
 print("Dirichlet-Multinomial posterior draw over the 8 REST/LEG/PEAK patterns:\n", theta_demo.round(3))
 
 # %% [markdown]
-# ## Final variable set & the Phase 2 plan
+# ## Final variable set & the Phase 2 modelling plan
+#
+# Four variable blocks survive Phase 1, each with a different likelihood/update rule below.
 
 # %%
 final_vars = pd.DataFrame([
@@ -499,9 +504,30 @@ final_vars = pd.DataFrame([
 final_vars
 
 # %% [markdown]
-# One latent cluster label per patient drives both blocks jointly - a single shared Dirichlet Process
-# partition (stick-breaking, $H=15$), fit by a joint Gibbs sampler.
+# **The Phase 2 modelling plan, in order:**
+#
+# 1. **One shared cluster label per patient.** A single Dirichlet Process partition (stick-breaking,
+#    truncated at $H=15$ components) assigns every patient to exactly one latent cluster. The same
+#    label drives the continuous block and the categorical block jointly — this is one clustering
+#    with mixed-type data, not two separate clusterings glued together afterwards.
+# 2. **Continuous, step-varying block (5 vars $\times$ 3 steps = 15 dims).** Each variable's own
+#    REST/LEG/PEAK triplet gets its own $3\times3$ Normal-Inverse-Wishart (NIW) conjugate update per
+#    cluster, capturing the within-variable correlation across exercise steps without needing the
+#    full $19\times19$ matrix.
+# 3. **Continuous, slope-type block (4 dims).** Already a single PEAK-derived value per patient, so
+#    each gets its own independent Normal-Inverse-Gamma (NIG) update per cluster — 1-D, no
+#    REST/LEG/PEAK correlation to model.
+# 4. **Categorical, exercise-dependent block (7 vars, 8 joint REST/LEG/PEAK patterns).** Each flag's
+#    full (REST, LEG, PEAK) triplet is treated as one of 8 joint categories, fit with a
+#    Dirichlet-Multinomial update per cluster — the categorical counterpart of step 2's NIW treatment.
+# 5. **Categorical, patient-constant block (3 vars).** `SESSO`, `RITMO`, `BA` don't vary by STEP, so
+#    each gets an independent Beta-Bernoulli update per cluster.
+# 6. **Fitting.** All four blocks' updates (steps 2-5) are conditionally conjugate given the cluster
+#    labels, so the whole model is fit by a joint Gibbs sampler: resample each patient's cluster
+#    label given the current block parameters, then resample each block's parameters per cluster
+#    given the current labels, and iterate.
 
+# %% [markdown]
 # ## Running sensitivity-analysis log
 
 # %%
