@@ -19,8 +19,6 @@
 #
 # **Progress notes - replication & variable assessment &
 # modelling strategy**
-#
-# *Mitch Wishart*
 
 # %% [markdown]
 # ::: {.callout-note}
