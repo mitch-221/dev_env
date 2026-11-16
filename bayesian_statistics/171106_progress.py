@@ -507,30 +507,33 @@ final_vars
 # %% [markdown]
 # **The Phase 2 modelling plan:**
 #
-# 1. **One shared cluster label per patient.** A single Dirichlet Process partition (stick-breaking,
-#    truncated at $H=15$ components) assigns every one of the 80 patients to exactly one latent
-#    cluster. The same label drives the continuous block and the categorical block jointly — one
-#    clustering over mixed-type data, not two separate clusterings glued together afterwards.
-# 2. **Continuous block (19 dims total).** The 5 step-varying variables (15 dims: 3 steps each) get
-#    a $3\times3$ Normal-Inverse-Wishart (NIW) conjugate update per cluster, capturing the
-#    REST/LEG/PEAK correlation within each variable; the 4 slope-type variables (already a single
-#    PEAK-derived value per patient) each get an independent 1-D Normal-Inverse-Gamma (NIG) update
-#    per cluster. Together this is the block-diagonal covariance from the feasibility argument above
-#    — 19 dims handled as 5 small 3x3 blocks + 4 scalars, never the full $19\times19$ matrix.
-# 3. **Categorical block (10 dims total).** The 7 exercise-dependent flags get a Dirichlet-Multinomial
-#    update per cluster, one update over the 8 joint REST/LEG/PEAK categories per flag; the 3
-#    patient-constant variables (`SESSO`, `RITMO`, `BA`) don't vary by STEP, so each gets its own
-#    independent Beta-Bernoulli update per cluster.
-#
-# **4. Fitting: a Gibbs sampler over both blocks.**
-#
-# The joint posterior over cluster labels and cluster parameters has no closed form, so MCMC
-# approximates it: thousands of iterations alternating between (a) resampling each patient's cluster
-# label, proportional to the combined likelihood of their data across all four blocks under each
-# cluster's current parameters, and (b) resampling each cluster's parameters from their (conjugate)
-# posterior given only the patients currently assigned there. After burn-in, the remaining draws
-# approximate the posterior over cluster membership and parameters — with uncertainty attached,
-# unlike $k$-means' single hard partition.
+# **1. Specify the model.** One shared Dirichlet Process partition (stick-breaking, truncated at
+#    $H=15$ components) assigns every one of the 80 patients to exactly one latent cluster; that same
+#    label drives two block likelihoods jointly, not two clusterings glued together afterwards:
+#    - *Continuous (19 dims).* 5 step-varying variables (15 dims) each get a $3\times3$
+#      Normal-Inverse-Wishart (NIW) prior per cluster; 4 slope-type variables (4 dims) each get a
+#      1-D Normal-Inverse-Gamma (NIG) prior per cluster — the block-diagonal covariance from the
+#      feasibility argument above, never the full $19\times19$ matrix.
+#    - *Categorical (10 dims).* 7 exercise-dependent flags each get a Dirichlet-Multinomial prior
+#      per cluster over their 8 joint REST/LEG/PEAK categories; 3 patient-constant variables
+#      (`SESSO`, `RITMO`, `BA`) each get a Beta-Bernoulli prior per cluster.
+# **2. Initialize.** Fix each block's prior hyperparameters and $H=15$; give every patient a starting
+#    label, either at random or warm-started from Phase 0's $k$-means partition.
+# **3. Run the Gibbs sampler.** The joint posterior over labels and cluster parameters has no closed
+#    form, so MCMC approximates it: alternate, for thousands of iterations, (a) resampling every
+#    patient's label, proportional to the combined likelihood of their data across both blocks under
+#    each cluster's current parameters, and (b) resampling each cluster's parameters from their
+#    conjugate posterior given only the patients currently assigned there.
+# **4. Check convergence.** Inspect trace plots and run several chains from different starting
+#    labels; only once they agree and look stationary are the draws trustworthy as posterior samples
+#    — discard the early "burn-in" iterations before that point.
+# **5. Resolve label-switching.** Cluster labels are arbitrary across iterations (cluster "3" in one
+#    draw needn't be the same group as cluster "3" in another), so the kept draws can't just be
+#    averaged directly. Build a patient-by-patient co-clustering matrix (how often two patients
+#    landed in the same cluster) and extract one representative partition from it.
+# **6. Report.** Summarize each final cluster's block parameters — means, covariances, category
+#    probabilities — as posterior point estimates with credible intervals: the uncertainty-aware
+#    counterpart of Phase 0's single hard $k$-means partition.
 
 # %% [markdown]
 # ## Running sensitivity-analysis log
