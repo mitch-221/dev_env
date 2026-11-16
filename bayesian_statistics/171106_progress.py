@@ -17,19 +17,22 @@
 #
 # # Bayesian Clustering for Data-Driven Clinical Staging in HFpEF
 #
-# **Progress notes - replication, variable assessment &
+# **Progress notes - replication & variable assessment &
 # modelling strategy**
+#
+# *Mitch Wishart*
 
 # %% [markdown]
 # ::: {.callout-note}
-# **TL;DR** - We reproduced the original method (Caravita et al. (2026)) closely but not exactly
+# **Overview**
+# We reproduced the original method (Caravita et al. (2026)) closely but not exactly
 # (Phase 0), then went back to first principles on which variables and what model structure our own
 # Bayesian nonparametric model should actually use, given $n=80$ patients (Phase 1).
 # It was found that a full covariance matrix over the correlated continuous variables is numerically infeasible
 # at this sample size - demonstrated below - which is the single biggest constraint shaping
 # the whole model design (block-diagonal covariance instead of full or plain diagonal).
 #
-# This is the informal first look. We will convert to LaTeX. This is also originally done in python.
+# This is the informal first look. We will convert to LaTeX for the presentation. This is also originally done in python.
 # :::
 
 # %%
@@ -328,7 +331,7 @@ print("Not usable at ANY covariance structure -> confirms falling back to the pa
 #
 # The paper's 14 clinically-relevant candidates were taken as it was the only justifiable method
 # to significantly reduce variables. Pure correlation screening and filtering by data availability left
-# us with 43 continuous candidates - still too many. 6/8 of the paper's final variables past the crude
+# us with 43 continuous candidates - still too many. 6/8 of the paper's final variables passed the crude
 # screening, indicating the other 2 were clinically-based decisions.
 
 # %%
@@ -410,7 +413,7 @@ print("A Gaussian density divides by sqrt(det(Sigma)) - determinants close to ze
 
 # %% [markdown]
 # In a fully Bayesian treatment with a proper
-# Normal-Inverse-Wishart prior, the posterior will still be product. But
+# Normal-Inverse-Wishart prior, the posterior will still be produced. But
 # at these sample sizes the posterior is then almost entirely prior-driven. A full $19\times19$ covariance matrix
 # is not usable for handling correlated continuous variables at this sample size.
 
@@ -518,6 +521,7 @@ final_vars
 #    update per cluster, one update over the 8 joint REST/LEG/PEAK categories per flag; the 3
 #    patient-constant variables (`SESSO`, `RITMO`, `BA`) don't vary by STEP, so each gets its own
 #    independent Beta-Bernoulli update per cluster.
+#
 # **4. Fitting: a Gibbs sampler over both blocks.**
 #
 # The joint posterior over cluster labels and cluster parameters has no closed form, so MCMC
