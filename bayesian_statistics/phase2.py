@@ -106,32 +106,49 @@ for df in (rest, leg, peak):
 patients = rest.merge(leg, on="ID").merge(peak, on="ID")
 for v in slope_vars:
     patients[v] = patients[f"{v}_PEAK"]  # genuinely single-valued; any step column is identical
-for v in peak_binary_vars:
-    patients[v] = patients[f"{v}_PEAK"]  # exercise-dependent flags: PEAK specifically (Phase 1 §0)
 # SESSO/RITMO are only recorded on the REST row of the raw files (LEG/PEAK rows are
 # blank for these two columns) — confirmed empirically; BA is populated at every STEP.
 patients["SESSO"] = patients["SESSO_REST"]
 patients["RITMO"] = patients["RITMO_REST"]
 patients["BA"] = patients["BA_PEAK"]
-patients.drop(columns=[c for c in patients.columns
-                        if any(c.startswith(f"{v}_") for v in slope_vars + binary_vars)],
-              inplace=True)
 
+# The 7 exercise-dependent flags: instead of collapsing to a single PEAK value (which
+# requires asserting PEAK is "the most revealing" STEP — an undocumented assumption,
+# Phase 1 §0/§9), encode each flag's full (REST, LEG, PEAK) triplet as one of 8 joint
+# patterns (binary-to-decimal: 4*REST + 2*LEG + 1*PEAK). Modelled below with a
+# Dirichlet-Multinomial conjugate update — the categorical counterpart of the
+# continuous block's 3x3 NIW blocks (Phase 1 §9 Step 3).
+for v in peak_binary_vars:
+    patients[f"{v}_cat"] = 4 * patients[f"{v}_REST"] + 2 * patients[f"{v}_LEG"] + patients[f"{v}_PEAK"]
+
+cat_cols = [f"{v}_cat" for v in peak_binary_vars]
 cluster_cols = [f"{v}_{s}" for v in step_varying for s in ("REST", "LEG", "PEAK")] + slope_vars
-patients_full = patients[["ID"] + cluster_cols + binary_vars].dropna().reset_index(drop=True)
+patients_full = patients[["ID"] + cluster_cols + cat_cols + constant_binary_vars].dropna().reset_index(drop=True)
+patients_full[cat_cols] = patients_full[cat_cols].astype(int)
 patient_ids = patients_full["ID"].to_numpy()
+
+# Keep clinically-readable decoded REST/LEG/PEAK 0/1 values too, purely for profiling
+# later (decoded from the category, not re-pulled — the category IS the full record now).
+for v in peak_binary_vars:
+    patients_full[f"{v}_REST_dec"] = (patients_full[f"{v}_cat"] // 4) % 2
+    patients_full[f"{v}_LEG_dec"] = (patients_full[f"{v}_cat"] // 2) % 2
+    patients_full[f"{v}_PEAK_dec"] = patients_full[f"{v}_cat"] % 2
 
 n = len(patients_full)
 d_cont = len(cluster_cols)
-d_bin = len(binary_vars)
-print(f"n = {n} patients, continuous block d = {d_cont} dims, binary/categorical block d = {d_bin} dims")
+d_dir = len(peak_binary_vars)              # Dirichlet-Multinomial flags (7)
+d_bin_simple = len(constant_binary_vars)   # plain Beta-Bernoulli flags (3)
+print(f"n = {n} patients, continuous block d = {d_cont} dims, "
+      f"categorical block: {d_dir} Dirichlet-Multinomial flags + {d_bin_simple} Beta-Bernoulli flags")
 print(f"Continuous columns: {cluster_cols}")
-print(f"Binary/categorical columns: {binary_vars}")
+print(f"Dirichlet-Multinomial flags (joint REST/LEG/PEAK): {peak_binary_vars}")
+print(f"Beta-Bernoulli flags (patient-level constants): {constant_binary_vars}")
 
 X_raw = patients_full[cluster_cols].to_numpy()
 col_mean, col_sd = X_raw.mean(axis=0), X_raw.std(axis=0)
 X = (X_raw - col_mean) / col_sd
-B = patients_full[binary_vars].to_numpy()
+B_cat = patients_full[cat_cols].to_numpy(dtype=int)          # (n, 7), values in {0,...,7}
+B_simple = patients_full[constant_binary_vars].to_numpy()    # (n, 3)
 
 # Index bookkeeping: which columns of X belong to which block.
 block_idx = {v: [cluster_cols.index(f"{v}_{s}") for s in ("REST", "LEG", "PEAK")] for v in step_varying}
@@ -162,14 +179,30 @@ slope_idx = [cluster_cols.index(v) for v in slope_vars]
 # needs n_cluster>=4 to be well-posed, which every cluster we've produced
 # clears easily.
 #
-# **Categorical/binary likelihood — independent Bernoulli per dimension,
-# Beta-Bernoulli conjugate, across all 10 variables.** This is the brief's
-# suggested Hamming-distance kernel in its working form (Phase 1 §9).
+# **Categorical/binary likelihood — two treatments, by whether a flag is
+# exercise-dependent:**
+#
+# $$
+# b_i \mid r_i=h \;\sim\; \Big[\prod_{v \in \text{7 flags}} \text{Categorical}(c_{i,v}; \boldsymbol\theta_{h,v})\Big]
+# \times \Big[\prod_{\ell \in \text{3 constants}} \text{Bernoulli}(b_{i\ell}; p_{h\ell})\Big]
+# $$
+#
+# The 3 patient-level constants (`SESSO`, `RITMO`, `BA`) keep independent
+# Beta-Bernoulli conjugate updates — the brief's Hamming-distance kernel in
+# its working form (Phase 1 §9). The 7 exercise-dependent flags are no
+# longer collapsed to a single PEAK value (which required asserting PEAK
+# is "the most revealing" STEP — never documented, only inferred). Instead,
+# each flag's full $(REST, LEG, PEAK)$ triplet is treated as one of 8 joint
+# categories $c_{i,v} \in \{0,\dots,7\}$, with a **Dirichlet-Multinomial**
+# conjugate update per cluster per flag — the direct categorical analogue
+# of the continuous block's 3x3 NIW treatment: both let the model learn
+# the real joint structure across the three exercise stages, rather than
+# having us assert which stage matters.
 
 # %%
 H = 15
 
-# NIW hyperparameters for each 3-dim block (shared prior across h and v).
+# NIW hyperparameters for each 3-dim continuous block (shared prior across h and v).
 p_blk = 3
 m0_blk = np.zeros(p_blk)
 kappa0_blk = 1.0
@@ -179,10 +212,15 @@ Psi0_blk = np.eye(p_blk) * (nu0_blk - p_blk - 1)   # = I, so E[Sigma] = I (match
 # NIG hyperparameters for the 4 slope (1-D) dimensions.
 m0, kappa0, a0, b0 = 0.0, 1.0, 2.0, 1.0
 
-# Beta-Bernoulli hyperparameters for the 10 categorical dimensions.
+# Beta-Bernoulli hyperparameters for the 3 patient-level-constant categorical dimensions.
 a_bin, b_bin = 1.0, 1.0
-EPS = 1e-9
 
+# Dirichlet hyperparameter for the 7 exercise-dependent flags' 8-category joint pattern
+# (symmetric alpha0=1 everywhere == uniform prior over the 8 REST/LEG/PEAK combinations).
+n_cat = 8
+alpha0_dir = np.ones(n_cat)
+
+EPS = 1e-9
 ga_a, ga_b = 1.0, 1.0   # Gamma hyperprior on M
 
 
@@ -230,6 +268,13 @@ def sample_beta_bernoulli_posterior(b_col):
     return RNG.beta(a_bin + n1, b_bin + (nj - n1))
 
 
+def sample_dirichlet_posterior(cat_col):
+    """Dirichlet posterior draw over the 8 joint REST/LEG/PEAK categories, given
+    cat_col: 1-D int array of category labels {0,...,7} for this cluster/flag."""
+    counts = np.bincount(cat_col, minlength=n_cat) if len(cat_col) else np.zeros(n_cat)
+    return RNG.dirichlet(alpha0_dir + counts)
+
+
 # %% [markdown]
 # ## Joint Gibbs sampler
 
@@ -242,7 +287,8 @@ mu_blk = {v: np.zeros((H, 3)) for v in step_varying}
 Sigma_blk = {v: np.tile(np.eye(3), (H, 1, 1)) for v in step_varying}
 mu_slope = np.zeros((H, len(slope_vars)))
 sigma2_slope = np.ones((H, len(slope_vars)))
-p_bin = np.full((H, d_bin), 0.5)
+theta_dir = {v: np.full((H, n_cat), 1.0 / n_cat) for v in peak_binary_vars}  # Dirichlet-Multinomial
+p_bin = np.full((H, d_bin_simple), 0.5)  # Beta-Bernoulli (SESSO, RITMO, BA only)
 
 n_occupied_trace = np.zeros(n_iter, dtype=int)
 r_samples = np.zeros((n_iter - burn_in, n), dtype=int)
@@ -260,9 +306,12 @@ for it in range(n_iter):
 
     # (b) categorical block parameters
     for h in range(H):
-        B_h = B[members_mask[h]]
-        for l in range(d_bin):
-            p_bin[h, l] = sample_beta_bernoulli_posterior(B_h[:, l])
+        Bc_h = B_cat[members_mask[h]]       # (n_h, 7) joint-pattern categories
+        Bs_h = B_simple[members_mask[h]]    # (n_h, 3) patient-level constants
+        for j, v in enumerate(peak_binary_vars):
+            theta_dir[v][h] = sample_dirichlet_posterior(Bc_h[:, j])
+        for l in range(d_bin_simple):
+            p_bin[h, l] = sample_beta_bernoulli_posterior(Bs_h[:, l])
 
     # (c) stick-breaking weights
     counts = np.bincount(r, minlength=H)
@@ -283,9 +332,14 @@ for it in range(n_iter):
     for j, sidx in enumerate(slope_idx):
         diff2 = (X[:, sidx:sidx + 1] - mu_slope[:, j][None, :]) ** 2
         log_lik += -0.5 * (np.log(2 * np.pi * sigma2_slope[:, j][None, :]) + diff2 / sigma2_slope[:, j][None, :])
+    # Dirichlet-Multinomial log-lik for the 7 exercise-dependent flags (joint REST/LEG/PEAK pattern).
+    for j, v in enumerate(peak_binary_vars):
+        theta_log = np.log(np.clip(theta_dir[v], EPS, 1.0))   # (H, 8)
+        log_lik += theta_log[:, B_cat[:, j]].T                # (n, H)
+    # Beta-Bernoulli log-lik for the 3 patient-level-constant flags.
     p_safe = np.clip(p_bin, EPS, 1 - EPS)
-    log_lik += (B[:, None, :] * np.log(p_safe)[None, :, :]
-                + (1 - B[:, None, :]) * np.log(1 - p_safe)[None, :, :]).sum(axis=2)
+    log_lik += (B_simple[:, None, :] * np.log(p_safe)[None, :, :]
+                + (1 - B_simple[:, None, :]) * np.log(1 - p_safe)[None, :, :]).sum(axis=2)
 
     log_lik -= log_lik.max(axis=1, keepdims=True)
     probs = np.exp(log_lik)
@@ -414,13 +468,27 @@ ax.set_title("Peak-exercise mean PAWP by cluster")
 plt.tight_layout()
 plt.show()
 
-print("\nCategorical/binary block prevalence by cluster:")
-print(profile_df.groupby("cluster")[binary_vars].mean().round(3))
+print("\nCategorical/binary block prevalence by cluster (patient-level constants):")
+print(profile_df.groupby("cluster")[constant_binary_vars].mean().round(3))
 
+print("\nDirichlet-Multinomial flags — decoded REST/LEG/PEAK prevalence by cluster "
+      "(clinically readable view of what the model actually fit on the full joint pattern):")
+for v in peak_binary_vars:
+    decoded_cols = [f"{v}_REST_dec", f"{v}_LEG_dec", f"{v}_PEAK_dec"]
+    tbl = profile_df.groupby("cluster")[decoded_cols].mean().round(3)
+    tbl.columns = ["REST", "LEG", "PEAK"]
+    print(f"\n{v}:")
+    print(tbl)
+
+binary_profile_cols = [f"{v}_PEAK_dec" for v in peak_binary_vars] + constant_binary_vars
+binary_profile_labels = peak_binary_vars + constant_binary_vars
 fig, ax = plt.subplots(figsize=(10, 4))
-profile_df.groupby("cluster")[binary_vars].mean().T.plot(kind="bar", ax=ax)
+plot_df = profile_df.groupby("cluster")[binary_profile_cols].mean()
+plot_df.columns = binary_profile_labels
+plot_df.T.plot(kind="bar", ax=ax)
 ax.set_ylabel("Prevalence")
-ax.set_title("Binary/categorical phenotype prevalence by cluster")
+ax.set_title("Binary/categorical phenotype prevalence by cluster\n"
+             "(7 flags shown at PEAK for readability; model fit the full REST/LEG/PEAK pattern)")
 ax.legend(title="cluster", bbox_to_anchor=(1.02, 1), loc="upper left")
 plt.tight_layout()
 plt.show()
@@ -437,10 +505,19 @@ plt.show()
 # - Categorical/binary block expanded to 10 variables, adding `SESSO`,
 #   `RITMO`, `BA` (confirmed patient-level constants, unlike the original
 #   7 PEAK-step-dependent flags).
+# - The 7 exercise-dependent flags are no longer collapsed to a single
+#   PEAK value — each flag's full REST/LEG/PEAK pattern is modelled
+#   jointly via Dirichlet-Multinomial, the categorical counterpart of the
+#   continuous block's 3x3 NIW treatment, so neither block relies on an
+#   undocumented "which STEP matters" assumption anymore.
 # - Compare the posterior P(k) here against the earlier pure-diagonal,
-#   8-variable, 7-flag version: if block-diagonal covariance is doing what
-#   it's meant to, the posterior should concentrate closer to the paper's
-#   k=5 than the pure-diagonal model's 8-9.
+#   8-variable, PEAK-only-flags version: block-diagonal covariance alone
+#   pulled the posterior from 8-9 clusters down to 5-6; adding the full
+#   REST/LEG/PEAK pattern for the binary flags (this version) found
+#   additional real structure the PEAK-only version couldn't see, moving
+#   it to 6-7 clusters — still well short of the old over-fragmentation,
+#   but worth checking (via the co-clustering matrix) whether the smallest
+#   new clusters are stable or just noise before treating this as final.
 # - Still outstanding: the PAWP.A/RAP.V.AMPL sensitivity re-run, and a
 #   predictive example for a new, out-of-sample patient (required-analysis
 #   item 8) — neither built yet.
