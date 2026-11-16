@@ -451,17 +451,17 @@ for v in ["SESSO", "RITMO", "BA"]:
 # %% [markdown]
 # ## 6. Covariance structure: parameter counting and a feasibility check
 #
-# Having settled on the paper's 8 continuous variables, the next model
-# decision is what covariance structure the Gaussian kernel should use.
-# This is arithmetic, not intuition.
+# Having settled on the 9 mechanically-derived continuous variables (§5),
+# the next model decision is what covariance structure the Gaussian kernel
+# should use. This is arithmetic, not intuition.
 
 # %%
 N_NONSLOPE_14, N_SLOPE_14 = 9, 5   # of the 14, measured at 3 steps vs. PEAK-only
 d_all_14 = N_NONSLOPE_14 * 3 + N_SLOPE_14
-N_NONSLOPE_8, N_SLOPE_8 = 5, 3     # of the paper's final 8
-d_paper_8 = N_NONSLOPE_8 * 3 + N_SLOPE_8
+N_NONSLOPE_9, N_SLOPE_9 = 5, 4     # of our final 9 (mechanically-derived, §5)
+d_final_9 = N_NONSLOPE_9 * 3 + N_SLOPE_9
 print(f"All 14 continuous candidates, expanded across steps: d = {d_all_14}")
-print(f"Paper's final 8, expanded across steps: d = {d_paper_8}")
+print(f"Our final 9 (mechanically-derived), expanded across steps: d = {d_final_9}")
 
 def full_cov_params(d):
     return d * (d + 1) // 2 + d
@@ -469,7 +469,7 @@ def full_cov_params(d):
 def diag_cov_params(d):
     return 2 * d
 
-for d, label in [(d_all_14, "all 14, expanded"), (d_paper_8, "paper's 8, expanded")]:
+for d, label in [(d_all_14, "all 14, expanded"), (d_final_9, "our final 9, expanded")]:
     print(f"{label:24s} (d={d:2d}):  full={full_cov_params(d):4d} params/cluster   "
           f"diagonal={diag_cov_params(d):3d} params/cluster")
 
@@ -479,14 +479,14 @@ kmeans_sizes = [18, 13, 29, 8, 12]   # Phase 0, k-means, k=5
 for name, sizes in [("Phase 0 k-means (k=5)", kmeans_sizes)]:
     min_n = min(sizes)
     print(f"\n{name}: sizes={sizes}, smallest cluster n={min_n}")
-    for d, label in [(d_all_14, "d=32 (unfiltered 14)"), (d_paper_8, "d=18 (paper's 8)")]:
+    for d, label in [(d_all_14, "d=32 (unfiltered 14)"), (d_final_9, "d=19 (our final 9)")]:
         need = d + 1
         print(f"    full covariance at {label}: needs n>={need} per cluster -> "
               f"{'FEASIBLE' if min_n >= need else 'SINGULAR (infeasible)'} for the smallest cluster")
 
-# A concrete, tiny demonstration: n=5, d=18 (smaller than any real cluster above).
+# A concrete, tiny demonstration: n=5, d=19 (smaller than any real cluster above).
 rng = np.random.default_rng(0)
-n_tiny, d_tiny = 5, 18
+n_tiny, d_tiny = 5, d_final_9
 X_tiny = rng.normal(size=(n_tiny, d_tiny))
 S = np.cov(X_tiny, rowvar=False)
 rank, det, cond = np.linalg.matrix_rank(S), np.linalg.det(S), np.linalg.cond(S)
@@ -497,22 +497,30 @@ print("A multivariate Gaussian density divides by sqrt(determinant); a determina
       "happens to return a number without raising an error.")
 
 print(f"\nDiagonal covariance needs only n>=2 per cluster per dimension — every cluster produced "
-      f"in Phase 0 (smallest n={min(kmeans_sizes)}) clears that easily, at either d.")
+      f"in Phase 0 (smallest n={min(kmeans_sizes)}) clears that easily, at either d. A block-"
+      f"diagonal covariance (3x3 blocks, one per step-varying variable) needs n>=4 per cluster per "
+      f"block — the actual choice made for Phase 2, see Step 2 below: it captures real within-"
+      f"variable correlation across REST/LEG/PEAK without needing the full d=19 matrix.")
 
 SENSITIVITY_NOTES.append({
-    "decision": "Full vs. diagonal covariance for the continuous kernel",
+    "decision": "Full vs. diagonal vs. block-diagonal covariance for the continuous kernel",
     "finding": (
-        f"At d={d_paper_8} (paper's 8, expanded), a full covariance matrix needs n>={d_paper_8+1} "
+        f"At d={d_final_9} (our final 9, expanded), a full covariance matrix needs n>={d_final_9+1} "
         f"per cluster just to be invertible. Phase 0's actual smallest cluster (n={min(kmeans_sizes)}) "
-        "fails that test, and a small, over-fragmented DP mixture cluster (Phase 2 produces clusters "
-        "as small as n=1) fails it far worse."
+        "fails that test, and a small, over-fragmented DP mixture cluster (the pure-diagonal "
+        "prototype produced clusters as small as n=1) fails it far worse. But pure diagonal has its "
+        "own cost: it ignores the genuine, strong correlation between a variable's own REST/LEG/PEAK "
+        "readings (same physiological quantity, 3 timepoints), which is the likely driver of that "
+        "prototype's 8-9-cluster over-fragmentation versus the paper's k=5."
     ),
     "implication": (
-        "Diagonal covariance isn't one defensible option among several — given these cluster sizes, "
-        "it's close to the only numerically well-posed choice, independent of how many variables "
-        "survive filtering. Filtering down to 8 still matters because it keeps the independence "
-        "assumption underlying 'diagonal' more defensible (removes the known |r|>=0.80 redundancy), "
-        "not because it's what makes diagonal covariance necessary."
+        "Block-diagonal (one 3x3 NIW block per step-varying variable, independent of each other) "
+        "is the chosen middle ground: each block only needs n_cluster>=4 (comfortably met by "
+        "realistic clusters), while still modelling the real within-variable correlation a pure "
+        "diagonal throws away. Filtering down to 9 still matters because it keeps the cross-"
+        "variable independence assumption between blocks more defensible (removes the known "
+        "|r|>=0.80 redundancy between distinct physiological quantities), not because it's what "
+        "makes block-diagonal covariance numerically necessary."
     ),
 })
 
@@ -594,18 +602,52 @@ print(f"CATEGORICAL/BINARY BLOCK (10 variables): {CATEGORICAL_BLOCK}")
 # restricted, to match what n=80 can actually support (a 3x3 block needs
 # n_cluster>=4 to be well-posed, vs n_cluster>=20 for the full matrix).
 #
-# **Step 3 — Binary/categorical kernel: per-dimension Bernoulli, Beta-
-# Bernoulli conjugate, over all 10 categorical variables (§8).** Each
-# cluster $h$ has its own probability $p_{h,\ell}$ of each flag being 1; a
-# patient's categorical vector is most likely under whichever cluster's
-# $(p_{h,1},\dots,p_{h,10})$ pattern it's closest to in Hamming distance —
-# i.e. this independent-Bernoulli-per-dimension form *is* the Hamming-
-# distance kernel the brief suggests (Argiento, Filippi Mazzola & Paci
-# 2025), not an approximation of it. Cross-flag correlation (e.g. HFpEF
-# with RHF) is handled through having multiple distinct cluster profiles,
-# not assumed away — a materially different situation from the continuous
-# case, where the correlation is between repeated measurements of the same
-# quantity, not between genuinely different variables.
+# **Step 3 — Binary/categorical kernel: two different treatments,
+# depending on whether a variable is exercise-dependent (§8).**
+#
+# - **`SESSO`, `RITMO`, `BA`** (confirmed patient-level constants — no
+#   STEP question at all): plain per-dimension Beta-Bernoulli, as before.
+# - **The 7 original flags** (`PH`, `HFpEF`, `stiff.LA`, `high.PVR`, `RHF`,
+#   `TR`, `low.CO`): revised from a single PEAK-only value to a **joint
+#   REST/LEG/PEAK treatment** — the categorical analogue of Step 2's
+#   continuous 3x3 blocks. Collapsing to PEAK-only required asserting PEAK
+#   is "the most revealing" STEP, which is a reasonable guess but not a
+#   documented fact (§0); instead, each flag's (REST, LEG, PEAK) triplet is
+#   treated as one of 8 joint patterns, modelled with a **Dirichlet-
+#   Multinomial** conjugate update per cluster per flag — the direct binary
+#   counterpart of the continuous block's NIW update, letting the model
+#   infer whatever REST/LEG/PEAK pattern actually separates clusters
+#   instead of us asserting it. This needs only 7 free parameters per
+#   cluster per flag (vs. the continuous 3x3 block's 6 covariance
+#   parameters), and is actually *more* numerically forgiving at small
+#   n than NIW — a Dirichlet-Multinomial posterior is well-defined even
+#   with zero observations in a cluster, with no singularity risk.
+#
+# Each cluster's binary log-likelihood is the sum of the 3 constants' Beta-
+# Bernoulli terms and the 7 flags' Dirichlet-Multinomial terms. Cross-flag
+# correlation (e.g. HFpEF with RHF) is still handled through having
+# multiple distinct cluster profiles, not assumed away — a materially
+# different situation from the continuous case, where the correlation is
+# between repeated measurements of the same quantity, not between
+# genuinely different variables.
+
+SENSITIVITY_NOTES.append({
+    "decision": "Joint REST/LEG/PEAK (Dirichlet-Multinomial) treatment for the 7 exercise-"
+                "dependent binary flags, instead of a single PEAK-only value",
+    "finding": (
+        "The PEAK-only choice (sensitivity note [1]) rests on asserting PEAK is the most "
+        "diagnostically revealing STEP — a reasonable but undocumented assumption. The "
+        "continuous block's REST/LEG/PEAK correlation is handled with a real 3x3 Gaussian block "
+        "(Step 2), so collapsing the analogous structure in the binary block to one STEP, by "
+        "assertion, was inconsistent with that treatment."
+    ),
+    "implication": (
+        "Model all 8 possible (REST,LEG,PEAK) patterns per flag jointly via Dirichlet-Multinomial, "
+        "the binary counterpart of the continuous NIW block. Lets the data determine which STEP(s) "
+        "matter per flag per cluster instead of fixing it by assumption, and is feasible at small "
+        "cluster sizes (well-defined even at n=0, unlike NIW)."
+    ),
+})
 #
 # **Step 4 — Shared stick-breaking DP prior.** Truncated at $H=15$
 # (Ishwaran & James 2001 / book Algorithm 4), with concentration $M \sim
@@ -644,3 +686,64 @@ for i, note in enumerate(SENSITIVITY_NOTES, start=1):
     print(f"[{i}] {note['decision']}")
     print(f"    Finding:     {note['finding']}")
     print(f"    Implication: {note['implication']}\n")
+
+# %% [markdown]
+# ## 11. Summary — data analysis, characteristics, and the group's plan
+#
+# **What we analyzed.** All ~124 raw candidate columns across the three
+# dataset files, the true ID -> STEP -> variable structure behind them, and
+# the paper's own narrowing from ~140 raw measurements to a clinically-
+# reasoned 21 (14 continuous, 7 binary).
+#
+# **Key characteristics found:**
+#
+# - The raw data is long (one row per patient-STEP pair, 266 rows / 89
+#   patients); clustering requires pivoting to one row per patient first,
+#   with REST/LEG/PEAK becoming separate *columns* of that row (§0).
+# - A domain-blind correlation screen across all ~124 columns is not
+#   usable: it leaves 43 survivors, expanding to d=109 real patient-level
+#   dimensions — far beyond what n=80 can support under any covariance
+#   structure (§4).
+# - Applying the paper's own stated redundancy rule to their 14 clinically-
+#   relevant candidates mechanically yields **9** continuous survivors, not
+#   their published 8 — a discrepancy the available Methods text doesn't
+#   explain (§5).
+# - The 7 original binary flags are **not** fixed patient labels — they
+#   vary by STEP for most patients, consistent with HFpEF being unmasked
+#   by exercise (§0).
+# - 3 further categorical variables (`SESSO`, `RITMO`, `BA`) were wrongly
+#   excluded by an automated type check and are confirmed, genuine patient-
+#   level constants once recoded (§5).
+# - A full covariance matrix over either block is numerically infeasible
+#   at this sample size (demonstrated directly: near-zero determinant,
+#   condition number ~1e18, at a sample size larger than our smallest real
+#   cluster) — this constrains the model choice, not just the data (§6).
+#
+# **Final variable set:** 9 continuous variables (19 patient-level
+# dimensions) + 10 categorical/binary variables (§8).
+#
+# **What we intend to do as a group, step by step (§9, executed in
+# Phase 2):**
+#
+# 1. Standardize the continuous block.
+# 2. Model it with a block-diagonal Gaussian kernel — a genuine 3x3
+#    covariance block per step-varying variable (NIW), capturing real
+#    REST/LEG/PEAK correlation without needing the full, infeasible 19x19
+#    matrix.
+# 3. Model the categorical block with Beta-Bernoulli for the 3 patient-
+#    level constants, and Dirichlet-Multinomial over the joint
+#    REST/LEG/PEAK pattern for the 7 exercise-dependent flags — the
+#    categorical counterpart of the continuous block's treatment.
+# 4. Share one stick-breaking DP prior and one latent cluster label per
+#    patient across both blocks, so cluster assignment depends on both
+#    simultaneously.
+# 5. Fit by Gibbs sampling; summarize with Dahl's point estimate, the
+#    posterior co-clustering matrix, and per-patient membership
+#    probabilities.
+# 6. Profile the resulting clusters on both blocks, run the sensitivity
+#    analyses logged above, and produce a predictive example for a new
+#    patient — per the brief's required analyses.
+#
+# A working prototype of this plan already exists; this notebook's job
+# ends at the plan and its justification — execution and results belong to
+# Phase 2.
