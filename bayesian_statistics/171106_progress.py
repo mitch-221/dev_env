@@ -1,13 +1,27 @@
 # ---
 # title: "Bayesian Clustering for Data-Driven Clinical Staging in HFpEF"
-# subtitle: "Progress notes for the professors — Phase 0 (replication) and Phase 1 (variable assessment & modelling strategy)"
 # author: "Mitch Wishart"
 # format:
 #   html:
 #     toc: true
 #     code-fold: show
-#     code-overflow: wrap
 # ---
+
+# %% [markdown]
+# <style>
+# pre, pre code, div.sourceCode, div.sourceCode pre, div.sourceCode code {
+#   white-space: pre-wrap !important;
+#   word-break: break-word !important;
+#   overflow-x: visible !important;
+# }
+# </style>
+#
+# # Bayesian Clustering for Data-Driven Clinical Staging in HFpEF
+#
+# **Progress notes for the professors — Phase 0 (replication) and Phase 1 (variable assessment &
+# modelling strategy)**
+#
+# *Mitch Wishart*
 
 # %% [markdown]
 # ::: {.callout-note}
