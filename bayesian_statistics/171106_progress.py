@@ -219,10 +219,10 @@ plt.show()
 # plausible cause: $k$-means' sensitivity to random initialization and to unscaled distance,
 # neither of which we could fully pin down from the published method.
 #
-# **What Phase 0 established, and its limits.** Two of the paper's own limitations become concrete
+# **Phase 0** Two of the paper's own limitations become concrete
 # rather than assumed: unscaled Euclidean distance lets one variable dominate cluster assignment, and
 # $k$-means gives zero uncertainty - a patient is in exactly one cluster.
-# Also worth flagging: the paper's binary/categorical variables are not used anywhere
+# The paper's binary/categorical variables are not used anywhere
 # in its actual clustering step - only for post-hoc profiling afterwards.The two-block mixed-data
 # model will be an extension of the paper's method, not a replication.
 
