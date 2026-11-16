@@ -25,6 +25,7 @@
 # %% [markdown]
 # ::: {.callout-note}
 # **Overview**
+#
 # We reproduced the original method (Caravita et al. (2026)) closely but not exactly
 # (Phase 0), then went back to first principles on which variables and what model structure our own
 # Bayesian nonparametric model should actually use, given $n=80$ patients (Phase 1).
@@ -517,20 +518,25 @@ final_vars
 #    - *Categorical (10 dims).* 7 exercise-dependent flags each get a Dirichlet-Multinomial prior
 #      per cluster over their 8 joint REST/LEG/PEAK categories; 3 patient-constant variables
 #      (`SESSO`, `RITMO`, `BA`) each get a Beta-Bernoulli prior per cluster.
+#
 # **2. Initialize.** Fix each block's prior hyperparameters and $H=15$; give every patient a starting
 #    label, either at random or warm-started from Phase 0's $k$-means partition.
+#
 # **3. Run the Gibbs sampler.** The joint posterior over labels and cluster parameters has no closed
 #    form, so MCMC approximates it: alternate, for thousands of iterations, (a) resampling every
 #    patient's label, proportional to the combined likelihood of their data across both blocks under
 #    each cluster's current parameters, and (b) resampling each cluster's parameters from their
 #    conjugate posterior given only the patients currently assigned there.
+#
 # **4. Check convergence.** Inspect trace plots and run several chains from different starting
 #    labels; only once they agree and look stationary are the draws trustworthy as posterior samples
 #    — discard the early "burn-in" iterations before that point.
+#
 # **5. Resolve label-switching.** Cluster labels are arbitrary across iterations (cluster "3" in one
 #    draw needn't be the same group as cluster "3" in another), so the kept draws can't just be
 #    averaged directly. Build a patient-by-patient co-clustering matrix (how often two patients
 #    landed in the same cluster) and extract one representative partition from it.
+#
 # **6. Report.** Summarize each final cluster's block parameters — means, covariances, category
 #    probabilities — as posterior point estimates with credible intervals: the uncertainty-aware
 #    counterpart of Phase 0's single hard $k$-means partition.
