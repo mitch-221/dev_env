@@ -3,7 +3,8 @@
 # format:
 #   html:
 #     toc: true
-#     code-fold: show
+#     code-fold: true
+#     code-tools: true
 # ---
 
 # %% [markdown]
