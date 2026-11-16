@@ -7,8 +7,11 @@
 #     toc: true
 #     code-fold: show
 #     code-tools: true
+#     code-overflow: wrap
 #     theme: flatly
 #     fig-cap-location: bottom
+#     title-block-banner: true
+#     embed-resources: true
 # ---
 
 # %% [markdown]
@@ -101,8 +104,9 @@ dataset.head()
 
 # %%
 corr14 = dataset[hemo_vars_14].corr().round(3)
-fig, ax = plt.subplots(figsize=(6.5, 5.5))
-sns.heatmap(corr14, cmap="RdBu_r", vmin=-1, vmax=1, ax=ax, cbar_kws={"label": "Pearson r"})
+fig, ax = plt.subplots(figsize=(9, 7.5))
+sns.heatmap(corr14, cmap="RdBu_r", vmin=-1, vmax=1, ax=ax, annot=True, fmt=".2f",
+            annot_kws={"size": 6.5}, cbar_kws={"label": "Pearson r"})
 ax.set_title("Correlation matrix — paper's 14 clinically-relevant continuous variables")
 plt.xticks(rotation=60, ha="right", fontsize=8)
 plt.yticks(fontsize=8)
