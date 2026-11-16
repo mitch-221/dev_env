@@ -1,6 +1,5 @@
 # ---
 # title: "Bayesian Clustering for Data-Driven Clinical Staging in HFpEF"
-# author: "Mitch Wishart"
 # format:
 #   html:
 #     toc: true
@@ -18,22 +17,21 @@
 #
 # # Bayesian Clustering for Data-Driven Clinical Staging in HFpEF
 #
-# **Progress notes for the professors — Phase 0 (replication) and Phase 1 (variable assessment &
-# modelling strategy)**
+# **Progress notes - replication & variable assessment &
+# modelling strategy**
 #
 # *Mitch Wishart*
 
 # %% [markdown]
 # ::: {.callout-note}
-# **TL;DR** — We reproduced Caravita et al. (2026)'s own published pipeline closely but not exactly
+# **TL;DR** - We reproduced the original method (Caravita et al. (2026)) closely but not exactly
 # (Phase 0), then went back to first principles on which variables and what model structure our own
-# Bayesian nonparametric model should actually use, given $n=80$ patients (Phase 1). The headline
-# finding: a full covariance matrix over the correlated continuous variables is numerically infeasible
-# at this sample size — demonstrated directly below — which is the single biggest constraint shaping
+# Bayesian nonparametric model should actually use, given $n=80$ patients (Phase 1).
+# It was found that a full covariance matrix over the correlated continuous variables is numerically infeasible
+# at this sample size - demonstrated below - which is the single biggest constraint shaping
 # the whole model design (block-diagonal covariance instead of full or plain diagonal).
 #
-# This is the informal, code-alongside-the-reasoning first look. A tidied LaTeX write-up follows for
-# formal submission mid-week.
+# This is the informal first look. We will convert to LaTeX. This is also originally done in python.
 # :::
 
 # %%
@@ -55,10 +53,10 @@ DATA_DIR = Path(os.environ.get(
 ))
 
 # %% [markdown]
-# # Phase 0 — Reproducing the Published Pipeline
+# # Phase 0 — Reproducing the Pipeline
 #
 # The raw files (`dataset1/2/3.txt`) concatenate column-wise into one long table: one row per
-# (patient, exercise step), `STEP` $\in$ {REST, LEG, PEAK}. The paper names 21 variables as clinically
+# exercise step per patient, `STEP` $\in$ {REST, LEG, PEAK}. The paper names 21 variables as clinically
 # relevant (14 continuous + 7 binary), picked by domain judgement, then applies a redundancy rule
 # (drop one of any pair correlated $|r|\geq0.80$) to get its published 8 continuous variables.
 
@@ -104,12 +102,11 @@ print(f"n = {dataset['ID'].nunique()} patients, {len(dataset)} (patient, STEP) r
 dataset.head()
 
 # %% [markdown]
-# ## Correlation matrix (the basis for the redundancy screen)
+# ## Correlation matrix - basis for the redundancy screen
 #
-# Pooling all three STEP rows together (rather than, say, PEAK rows only) reproduces the paper's own
-# published correlation table almost exactly — e.g. PAPM$\leftrightarrow$PAWP.V.AMPL: published 0.549,
-# our recomputation 0.549 — which tells us how they actually computed it, since the Methods text
-# doesn't say.
+# Pooling all three STEP rows together reproduces the paper's own published correlation table
+# almost exactly - e.g. PAPM$\leftrightarrow$PAWP.V.AMPL: published 0.549,
+# our recomputation 0.549, mirroring how it was originally computed.
 
 # %%
 corr14 = dataset[hemo_vars_14].corr().round(3)
@@ -125,12 +122,10 @@ high_corr_pairs = (corr14.where(np.triu(np.ones(corr14.shape), k=1).astype(bool)
                    .stack().loc[lambda s: s.abs() >= 0.80].sort_values(ascending=False))
 print(f"{len(high_corr_pairs)} pairs at |r|>=0.80")
 
-# %% [markdown]
-# ## The redundancy rule, coded exactly as the paper describes it
-#
-# ::: {.callout-important}
-# Applying the paper's own rule to their own data gives **9** survivors, not the published **8** — a
-# real finding, not a replication slip (revisited properly in Phase 1).
+# %% [markdown]#
+# ::: {.callout-Note}
+# Applying the paper's own rule to their own data gives **9** survivors, not the published **8** -
+# RAP.MEDIA.CO.f.slp  has no correlation, |r|>0.80 (revisited properly in Phase 1).
 # :::
 
 # %%
@@ -171,8 +166,7 @@ print(f"Extra survivor the rule doesn't explain away: {sorted(survivors - set(pa
 # ## $k$-means replication
 #
 # Pivoting to one row per patient (REST/LEG/PEAK become columns), dropping incomplete rows, gives
-# $n=80$ — matches the paper. Running their exact stated method (unscaled Euclidean $k$-means, $k=5$
-# fixed by eye):
+# $n=80$. Replicating the method using unscaled Euclidean $k$-means, $k=5$:
 
 # %%
 step_varying_8 = ["PAWP.MEDIA", "PAWP.V.AMPL", "RAP.VY", "PVR.MEDIA", "CI"]
@@ -220,24 +214,23 @@ plt.tight_layout()
 plt.show()
 
 # %% [markdown]
-# Same $n$, same variables, same unscaled Euclidean $k$-means — membership still differs. Most
-# plausible cause: $k$-means' sensitivity to random initialization and to unscaled distance (one
-# variable's numeric range can dominate), neither of which the Methods text fully pins down.
+# Same $n$, same variables, same unscaled Euclidean $k$-means - membership still differs. Most
+# plausible cause: $k$-means' sensitivity to random initialization and to unscaled distance, 
+# neither of which we could fully pin down from the published method.
 #
 # **What Phase 0 established, and its limits.** Two of the paper's own limitations become concrete
 # rather than assumed: unscaled Euclidean distance lets one variable dominate cluster assignment, and
-# $k$-means gives zero uncertainty — a patient is in exactly one cluster, full stop. Also worth flagging
-# plainly: the paper's binary/categorical variables and any uncertainty measure are not used anywhere
-# in its actual clustering step — only for post-hoc profiling afterwards. So the two-block mixed-data
-# model the brief asks us to build is a genuine extension of the paper's method, not a reproduction of it.
+# $k$-means gives zero uncertainty - a patient is in exactly one cluster.
+# Also worth flagging: the paper's binary/categorical variables are not used anywhere
+# in its actual clustering step - only for post-hoc profiling afterwards.The two-block mixed-data
+# model will be an extension of the paper's method, not a replication.
 
 # %% [markdown]
-# # Phase 1 — Variable Assessment & Modelling Strategy
+# # Phase 1 - Variable Assessment & Modelling Strategy
 #
-# Phase 0 took the paper's 21 named variables as given. Phase 1 asks properly: of the **124** raw
-# candidate columns across the three files, which should *our* model actually use, and what model
-# structure can $n=80$ patients support? These turn out to be the same question, not two separate ones.
-
+# Phase 1 investigates the **124** raw
+# candidate columns across the three files and determines which our model should actually use.
+# We considered what structure $n=80$ patients could actually support.
 # %%
 full = pd.concat([list1, list2, list3], axis=1)
 candidate_cols = [c for c in full.columns if c not in ("ID", "STEP")]
@@ -247,8 +240,8 @@ print(f"{len(candidate_cols)} raw candidate columns, {full['ID'].nunique()} pati
 # %% [markdown]
 # ## Data structure & a concrete correction
 #
-# **Continuous** variables genuinely vary by STEP except 5 "slope" variables, PEAK-only by design.
-# Less obviously: the **7 binary flags** are *not* fixed patient labels either.
+# Continuous variables vary by STEP except 5 "slope" variables, PEAK-only by design.
+# The 7 binary flags are not fixed patient labels either.
 
 # %%
 prevalence_by_step = full.groupby("STEP")[binary_vars_7_raw].mean().loc[["REST", "LEG", "PEAK"]]
@@ -263,18 +256,8 @@ plt.tight_layout()
 plt.show()
 
 # %% [markdown]
-# HFpEF prevalence alone goes 40.4% (REST) $\to$ 88.8% (PEAK) — far too big a swing to be noise. These
+# HFpEF prevalence alone goes 40.4% (REST) $\to$ 88.8% (PEAK) - far too big a swing to be noise. These
 # are exercise-dependent diagnostic classifications, not static labels.
-#
-# ::: {.callout-note}
-# An earlier pass at this project computed binary prevalence by pooling all 3 STEP rows together —
-# silently mixing different clinical states. Wrong, and fixed. A second, related fix: 3 more columns
-# (`SESSO` [sex], `RITMO` [AFib vs. sinus rhythm], `BA`) were wrongly excluded as "non-numeric" — they're
-# just text-coded binaries, confirmed genuine patient-level constants. A third subtlety surfaced from
-# that fix: `SESSO`/`RITMO` are recorded on the **REST row only** in the raw files (LEG/PEAK blank for
-# those two specifically) — pulling a "constant" from whichever row is convenient isn't safe without
-# checking per column.
-# :::
 
 # %%
 for v in ["SESSO", "RITMO"]:
@@ -339,10 +322,12 @@ print("Not usable at ANY covariance structure -> confirms falling back to the pa
       "clinically-reasoned 21 instead of a blind statistical screen.")
 
 # %% [markdown]
-# ## Falling back to the paper's 21: the 9-vs-8 discrepancy
+# ## Falling back to the paper's variables
 #
-# Applying the identical rule to just the paper's 14 clinically-relevant candidates, using their own
-# clinical tie-break, reproduces the Phase 0 finding: **9 survivors, not 8**.
+# The paper's 14 clinically-relevant candidates were taken as it was the only justifiable method
+# to significantly reduce variables. Pure correlation screening and filtering by data availability left
+# us with 43 continuous candidates - still too many. 6/8 of the paper's final variables past the crude
+# screening, indicating the other 2 were clinically-based decisions.
 
 # %%
 nine_survivors = sorted(survivors)  # computed in Phase 0 above, on the identical 14-variable pool
@@ -375,30 +360,23 @@ print(f"Blind tie-break would keep {n_kept}/8 of the published list unchanged.")
 print(f"The other {8-n_kept}/8 (PAWP.MEDIA, RAP.VY) specifically needed clinical judgement.")
 unchanged = {v for v, (status, _, _) in tiebreak_results.items() if status == "kept"}
 
-# %% [markdown]
-# Not a claim the paper is wrong — it quantifies how much of their 8 is explainable by pure redundancy
-# screening (6/8) vs. genuinely needing clinical judgement (2/8).
-#
-# ::: {.callout-tip}
-# **Decision: use the mechanically-derived 9, not the published 8.** Matching their published list
-# exactly would mean matching their *result*, not their *stated method* — and since this project's
-# model is already an original extension, not a literal reproduction, following their method faithfully
-# is the more defensible, more transparent choice. This makes the continuous block **19 patient-level
-# dimensions** (5 step-varying $\times$ 3 steps = 15, plus 4 slope-type $\times$ 1 = 4).
+# We decided to use the mechanically-derived 9, not the published 8.
+# This makes the continuous block 19 patient-level
+# dimensions (5 step-varying $\times$ 3 steps = 15, plus 4 slope-type $\times$ 1 = 4).
 # :::
 #
-# ## Revised categorical block
+# ## Revised Binary/Categorical block
 #
-# `SESSO`, `RITMO`, `BA` are genuine, interpretable patient-level constants — added. `VO2.` (100%
-# missing) and `INSP.EXP.AVG` (one distinct value in the whole dataset) stay excluded, but for
-# zero-information reasons, not unclear meaning. No binary candidates beyond the paper's original 7
-# exist anywhere in the raw files — a fact about the data, not a screening choice. **Categorical block:
+# `SESSO`, `RITMO`, `BA` are genuine, interpretable patient-level constants. `VO2.` (100%
+# missing) and `INSP.EXP.AVG` (one distinct value in the whole dataset) stay excluded due to
+# zero added information. No binary candidates beyond the paper's original 7
+# exist anywhere in the raw files. **Categorical block:
 # 10 variables.**
 
 # %% [markdown]
-# ## Why a full covariance matrix is infeasible — the central constraint
+# ## Full covariance matrix feasibility
 #
-# This is arithmetic, not intuition, and it's the single biggest thing shaping the model design.
+# Patient sample-size limits the number of individuals per cluster and therefore limits parameter flexibility
 
 # %%
 def full_cov_params(d): return d * (d + 1) // 2 + d   # covariance + mean
@@ -425,20 +403,14 @@ rng = np.random.default_rng(0)
 X_tiny = rng.normal(size=(5, d_final_9))
 S = np.cov(X_tiny, rowvar=False)
 rank, det, cond = np.linalg.matrix_rank(S), np.linalg.det(S), np.linalg.cond(S)
-print(f"\nDemo: n=5, d={d_final_9} -> rank={rank} (full rank would be {d_final_9}), "
-      f"determinant={det:.3e}, condition number={cond:.3e}")
-print("A Gaussian density divides by sqrt(det(Sigma)) -- a determinant this close to zero makes that "
-      "density numerically meaningless, whether or not numpy's inv() happens to not crash.")
+print("A Gaussian density divides by sqrt(det(Sigma)) - determinants close to zero makes that "
+      "density numerically meaningless.")
 
 # %% [markdown]
-# ::: {.callout-important}
-# **Important nuance (not a loophole):** in a fully Bayesian treatment with a proper
-# Normal-Inverse-Wishart prior, the posterior doesn't literally crash — the prior regularizes it. But
-# at these sample sizes the posterior is then almost entirely prior-driven and correspondingly
-# uninformative, which is no more useful in practice. **A full $19\times19$ covariance matrix is the
-# one option that is simply not available** for handling correlated continuous variables at this
-# sample size — the only real design choices are how much correlation structure to keep *without*
-# forming the full matrix.
+# In a fully Bayesian treatment with a proper
+# Normal-Inverse-Wishart prior, the posterior will still be product. But
+# at these sample sizes the posterior is then almost entirely prior-driven. A full $19\times19$ covariance matrix
+# is not usable for handling correlated continuous variables at this sample size.
 # :::
 
 # %%
@@ -450,16 +422,13 @@ comparison = pd.DataFrame({
 comparison
 
 # %% [markdown]
-# **Diagonal** (every dimension independent) is numerically safe but throws away real information: a
-# variable's own REST/LEG/PEAK readings are three repeated measurements of the same physiological
-# quantity, not three unrelated facts — discarding that correlation is the likely cause of an early
-# all-diagonal prototype over-fragmenting into 8-9 clusters, well above the paper's $k=5$.
+# Diagonal methods (every dimension independent) is numerically safe but fails to acknowledge
+# REST/LEG/PEAK readings are three repeated measurements of the same quantity, not independent readings.
 #
-# **Block-diagonal** (adopted) is the resolution: each of the 5 step-varying variables gets its own
-# genuine $3\times3$ covariance block — a real multivariate Gaussian over just that one variable's
-# REST/LEG/PEAK triplet — via a Normal-Inverse-Wishart (NIW) conjugate update. Different variables'
-# blocks stay independent of each other (the full $19\times19$ is still never formed); only the *scope*
-# of each Gaussian (3 dims, not 19) is restricted to match what $n=80$ can support.
+# Block-diagonal was found as a potential solution. Each of the 5 step-varying variables gets its own
+# $3\times3$ covariance block - a multivariate Gaussian over just that one variable's
+# REST/LEG/PEAK triplet via a Normal-Inverse-Wishart (NIW) conjugate update. Different variables'
+# blocks stay independent of each other and the full $19\times19$ matrix is not required.
 
 # %%
 from scipy.stats import invwishart
@@ -496,15 +465,13 @@ mu_demo, Sigma_demo = sample_niw_posterior(Y_demo, demo_rng)
 print("NIW block posterior draw, n=6:\n  mu =", mu_demo.round(2), "\n  Sigma =\n", Sigma_demo.round(2))
 
 # %% [markdown]
-# ## Categorical kernel: two treatments, by whether a flag is exercise-dependent
+# ## Categorical kernel
 #
 # The 3 patient-level constants keep independent Beta-Bernoulli updates per cluster — the working form
-# of the Hamming-distance kernel the brief suggests. The 7 exercise-dependent flags are **not**
-# collapsed to a single PEAK value anymore (that needed an unstated "PEAK is most revealing" assumption,
-# inconsistent with how we treat the continuous REST/LEG/PEAK correlation). Instead, each flag's full
-# (REST, LEG, PEAK) triplet is one of 8 joint categories, fit with a **Dirichlet-Multinomial** — the
-# direct categorical counterpart of the continuous block's $3\times3$ NIW treatment, and actually more
-# forgiving numerically at small $n$ (well-defined even with zero observations, unlike NIW).
+# of the Hamming-distance kernel the brief suggests. The 7 exercise-dependent flags are not
+# collapsed to a single value. Instead, each flag's full
+# (REST, LEG, PEAK) triplet is one of 8 joint categories, fit with a*Dirichlet-Multinomial - the
+# direct categorical counterpart of the continuous block's $3\times3$ NIW treatment.
 
 # %%
 n_cat = 8
@@ -532,11 +499,9 @@ final_vars = pd.DataFrame([
 final_vars
 
 # %% [markdown]
-# One latent cluster label per patient drives both blocks jointly — a single shared Dirichlet Process
-# partition (stick-breaking, $H=15$, Escobar & West concentration update), fit by a joint Gibbs sampler,
-# summarized with Dahl's point estimate, the posterior co-clustering matrix, and per-patient membership
-# probabilities. A working prototype of this exact design already runs end-to-end.
-#
+# One latent cluster label per patient drives both blocks jointly - a single shared Dirichlet Process
+# partition (stick-breaking, $H=15$), fit by a joint Gibbs sampler.
+
 # ## Running sensitivity-analysis log
 
 # %%
@@ -555,9 +520,3 @@ sensitivity_log = pd.DataFrame([
      "Dirichlet-Multinomial lets the data decide"],
 ], columns=["Decision", "Finding", "Implication"])
 sensitivity_log
-
-# %% [markdown]
-# ---
-# Mitch Wishart · Bayesian Statistics group project, HFpEF clustering · informal progress notes.
-# A LaTeX version of this same material, tightened for formal submission, follows for
-# Wednesday/Friday.
