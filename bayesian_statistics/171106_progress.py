@@ -17,10 +17,8 @@
 #
 # # Bayesian Clustering for Data-Driven Clinical Staging in HFpEF
 #
-# **Progress notes - replication & variable assessment &
+# **Progress notes - replication, variable assessment &
 # modelling strategy**
-#
-# *Mitch Wishart*
 
 # %% [markdown]
 # ::: {.callout-note}
@@ -504,28 +502,31 @@ final_vars = pd.DataFrame([
 final_vars
 
 # %% [markdown]
-# **The Phase 2 modelling plan, in order:**
+# **The Phase 2 modelling plan:**
 #
 # 1. **One shared cluster label per patient.** A single Dirichlet Process partition (stick-breaking,
-#    truncated at $H=15$ components) assigns every patient to exactly one latent cluster. The same
-#    label drives the continuous block and the categorical block jointly — this is one clustering
-#    with mixed-type data, not two separate clusterings glued together afterwards.
-# 2. **Continuous, step-varying block (5 vars $\times$ 3 steps = 15 dims).** Each variable's own
-#    REST/LEG/PEAK triplet gets its own $3\times3$ Normal-Inverse-Wishart (NIW) conjugate update per
-#    cluster, capturing the within-variable correlation across exercise steps without needing the
-#    full $19\times19$ matrix.
-# 3. **Continuous, slope-type block (4 dims).** Already a single PEAK-derived value per patient, so
-#    each gets its own independent Normal-Inverse-Gamma (NIG) update per cluster — 1-D, no
-#    REST/LEG/PEAK correlation to model.
-# 4. **Categorical, exercise-dependent block (7 vars, 8 joint REST/LEG/PEAK patterns).** Each flag's
-#    full (REST, LEG, PEAK) triplet is treated as one of 8 joint categories, fit with a
-#    Dirichlet-Multinomial update per cluster — the categorical counterpart of step 2's NIW treatment.
-# 5. **Categorical, patient-constant block (3 vars).** `SESSO`, `RITMO`, `BA` don't vary by STEP, so
-#    each gets an independent Beta-Bernoulli update per cluster.
-# 6. **Fitting.** All four blocks' updates (steps 2-5) are conditionally conjugate given the cluster
-#    labels, so the whole model is fit by a joint Gibbs sampler: resample each patient's cluster
-#    label given the current block parameters, then resample each block's parameters per cluster
-#    given the current labels, and iterate.
+#    truncated at $H=15$ components) assigns every one of the 80 patients to exactly one latent
+#    cluster. The same label drives the continuous block and the categorical block jointly — one
+#    clustering over mixed-type data, not two separate clusterings glued together afterwards.
+# 2. **Continuous block (19 dims total).** The 5 step-varying variables (15 dims: 3 steps each) get
+#    a $3\times3$ Normal-Inverse-Wishart (NIW) conjugate update per cluster, capturing the
+#    REST/LEG/PEAK correlation within each variable; the 4 slope-type variables (already a single
+#    PEAK-derived value per patient) each get an independent 1-D Normal-Inverse-Gamma (NIG) update
+#    per cluster. Together this is the block-diagonal covariance from the feasibility argument above
+#    — 19 dims handled as 5 small 3x3 blocks + 4 scalars, never the full $19\times19$ matrix.
+# 3. **Categorical block (10 dims total).** The 7 exercise-dependent flags get a Dirichlet-Multinomial
+#    update per cluster, one update over the 8 joint REST/LEG/PEAK categories per flag; the 3
+#    patient-constant variables (`SESSO`, `RITMO`, `BA`) don't vary by STEP, so each gets its own
+#    independent Beta-Bernoulli update per cluster.
+# **4. Fitting: a Gibbs sampler over both blocks.**
+#
+# The joint posterior over cluster labels and cluster parameters has no closed form, so MCMC
+# approximates it: thousands of iterations alternating between (a) resampling each patient's cluster
+# label, proportional to the combined likelihood of their data across all four blocks under each
+# cluster's current parameters, and (b) resampling each cluster's parameters from their (conjugate)
+# posterior given only the patients currently assigned there. After burn-in, the remaining draws
+# approximate the posterior over cluster membership and parameters — with uncertainty attached,
+# unlike $k$-means' single hard partition.
 
 # %% [markdown]
 # ## Running sensitivity-analysis log
